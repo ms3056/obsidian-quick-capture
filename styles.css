@@ -1,0 +1,555 @@
+/* =========================================================
+   Quick Capture v1.4 (Standalone Electron BrowserWindow)
+   ========================================================= */
+.qc-standalone-root {
+    margin: 0;
+    padding: 14px 18px 12px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    position: relative;
+    box-sizing: border-box;
+    height: 100%;
+    background: #1e1e24;
+    color: #e4e4e7;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+    user-select: none;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 12px;
+}
+
+/* Top Drag Bar + Close Button for Standalone Floating Window */
+.qc-top-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 18px;
+    margin-top: -4px;
+    -webkit-app-region: drag;
+    cursor: grab;
+}
+
+.qc-top-title {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    color: #71717a;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.qc-top-close {
+    -webkit-app-region: no-drag;
+    background: transparent;
+    border: none;
+    color: #71717a;
+    font-size: 16px;
+    line-height: 1;
+    padding: 2px 6px;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+.qc-top-close:hover {
+    color: #f4f4f6;
+    background: rgba(255, 255, 255, 0.08);
+}
+
+/* Main borderless Spotlight-style Textarea */
+.qc-textarea-wrapper {
+    position: relative;
+    width: 100%;
+    flex: 1;
+    display: flex;
+    -webkit-app-region: no-drag;
+}
+
+.qc-textarea {
+    width: 100%;
+    min-height: 105px;
+    height: 100%;
+    resize: none;
+    padding: 4px 2px;
+    font-size: 16px;
+    line-height: 1.55;
+    border: none !important;
+    background: transparent !important;
+    color: #f4f4f6;
+    font-family: inherit;
+    box-sizing: border-box;
+    box-shadow: none !important;
+}
+
+.qc-textarea:focus {
+    outline: none !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+.qc-textarea::placeholder {
+    color: #71717a;
+}
+
+.qc-textarea.is-dragover {
+    border-radius: 8px;
+    outline: 2px dashed #8b5cf6 !important;
+    background: rgba(139, 92, 246, 0.08) !important;
+}
+
+/* Metadata Pill Badges Row */
+.qc-pills-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    min-height: 4px;
+    -webkit-app-region: no-drag;
+}
+
+.qc-pills-row:empty {
+    display: none;
+}
+
+.qc-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    font-size: 11.5px;
+    font-weight: 500;
+    background: rgba(139, 92, 246, 0.16);
+    color: #a78bfa;
+    border: 1px solid rgba(139, 92, 246, 0.35);
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.12s ease;
+}
+
+.qc-pill:hover {
+    background: rgba(139, 92, 246, 0.26);
+}
+
+.qc-pill .qc-pill-clear {
+    margin-left: 3px;
+    opacity: 0.75;
+    font-weight: 700;
+}
+
+.qc-pill .qc-pill-clear:hover {
+    opacity: 1;
+}
+
+/* Bottom Bar */
+.qc-bottom-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    gap: 8px;
+    position: relative;
+    -webkit-app-region: no-drag;
+}
+
+.qc-bottom-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    position: relative;
+}
+
+.qc-dest-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    border-radius: 7px;
+    font-size: 12.5px;
+    font-weight: 600;
+    background: #27272f;
+    color: #f4f4f6;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    cursor: pointer;
+    transition: all 0.12s ease;
+}
+
+.qc-dest-btn:hover {
+    border-color: #8b5cf6;
+}
+
+.qc-dest-btn svg {
+    width: 14px;
+    height: 14px;
+    color: #8b5cf6;
+    stroke: #8b5cf6;
+}
+
+/* Custom Destination Dropdown Menu */
+.qc-dest-menu {
+    position: absolute;
+    bottom: 36px;
+    left: 0;
+    width: 215px;
+    background: #1e1e24;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 10px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.65);
+    padding: 5px;
+    z-index: 1100;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.qc-dest-menu-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 9px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: #e4e4e7;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    text-align: left;
+}
+
+.qc-dest-menu-item:hover,
+.qc-dest-menu-item.is-active {
+    background: rgba(139, 92, 246, 0.22);
+    color: #c4b5fd;
+}
+
+.qc-dest-menu-left {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.qc-dest-menu-left svg {
+    width: 14px;
+    height: 14px;
+    stroke: #8b5cf6;
+}
+
+.qc-dest-menu-hint {
+    font-size: 10.5px;
+    color: #9ca3af;
+    font-family: monospace;
+}
+
+.qc-target-sub {
+    font-size: 11px;
+    color: #9ca3af;
+    font-family: monospace;
+    max-width: 195px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Right Action Cluster */
+.qc-bottom-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.qc-icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    height: 28px;
+    min-width: 28px;
+    padding: 0 7px;
+    border-radius: 6px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: #9ca3af;
+    cursor: pointer;
+    font-size: 11.5px;
+    transition: all 0.12s ease;
+}
+
+.qc-icon-btn:hover {
+    color: #f4f4f6;
+    background: #27272f;
+    border-color: rgba(255, 255, 255, 0.12);
+}
+
+.qc-icon-btn.has-value {
+    color: #a78bfa;
+    background: rgba(139, 92, 246, 0.15);
+    border-color: rgba(139, 92, 246, 0.35);
+}
+
+.qc-icon-btn svg {
+    width: 15px;
+    height: 15px;
+}
+
+.qc-btn-submit {
+    background: #8b5cf6;
+    color: #ffffff;
+    font-weight: 600;
+    font-size: 12.5px;
+    border: none;
+    border-radius: 7px;
+    padding: 5px 13px;
+    height: 28px;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    transition: opacity 0.12s ease;
+}
+
+.qc-btn-submit:hover {
+    opacity: 0.92;
+}
+
+/* Things-Style Floating Date Picker Popover */
+.qc-calendar-popover {
+    position: absolute;
+    bottom: 44px;
+    right: 12px;
+    width: 276px;
+    background: #1e1e24;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 11px;
+    box-shadow: 0 14px 38px rgba(0, 0, 0, 0.7);
+    padding: 9px;
+    z-index: 1200;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    -webkit-app-region: no-drag;
+}
+
+.qc-cal-type-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    background: #27272f;
+    padding: 3px;
+    border-radius: 7px;
+}
+
+.qc-cal-type-tab {
+    border: none;
+    background: transparent;
+    color: #9ca3af;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 6px;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+.qc-cal-type-tab.is-active {
+    background: #8b5cf6;
+    color: #ffffff;
+}
+
+.qc-cal-presets {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+}
+
+.qc-cal-preset-btn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 7px;
+    border-radius: 6px;
+    font-size: 11px;
+    background: #27272f;
+    color: #f4f4f6;
+    border: 1px solid transparent;
+    cursor: pointer;
+    text-align: left;
+}
+
+.qc-cal-preset-btn:hover {
+    border-color: #8b5cf6;
+}
+
+.qc-cal-preset-sub {
+    font-size: 10px;
+    color: #9ca3af;
+}
+
+.qc-cal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 2px 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #f4f4f6;
+}
+
+.qc-cal-nav {
+    display: flex;
+    gap: 3px;
+}
+
+.qc-cal-nav-btn {
+    background: transparent;
+    border: none;
+    color: #9ca3af;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+}
+
+.qc-cal-nav-btn:hover {
+    background: #27272f;
+    color: #f4f4f6;
+}
+
+.qc-cal-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 2px;
+    text-align: center;
+}
+
+.qc-cal-dow {
+    font-size: 10px;
+    font-weight: 600;
+    color: #71717a;
+    padding: 2px 0;
+}
+
+.qc-cal-day {
+    font-size: 11px;
+    padding: 4px 0;
+    border-radius: 6px;
+    border: none;
+    background: transparent;
+    color: #f4f4f6;
+    cursor: pointer;
+}
+
+.qc-cal-day:hover {
+    background: rgba(139, 92, 246, 0.25);
+}
+
+.qc-cal-day.is-outside {
+    color: #71717a;
+    opacity: 0.45;
+}
+
+.qc-cal-day.is-today {
+    font-weight: 700;
+    color: #a78bfa;
+    box-shadow: inset 0 0 0 1px #8b5cf6;
+}
+
+.qc-cal-day.is-selected {
+    background: #8b5cf6 !important;
+    color: #ffffff !important;
+    font-weight: 700;
+}
+
+.qc-cal-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding-top: 5px;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.qc-cal-native-input {
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 5px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    background: #27272f;
+    color: #f4f4f6;
+    flex: 1;
+}
+
+.qc-cal-clear-btn {
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 5px;
+    border: none;
+    background: transparent;
+    color: #9ca3af;
+    cursor: pointer;
+}
+
+.qc-cal-clear-btn:hover {
+    color: #f87171;
+}
+
+/* Shortcut Footer Strip */
+.qc-shortcut-strip {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 10.5px;
+    color: #71717a;
+    padding: 0 2px;
+    flex-wrap: wrap;
+    gap: 6px;
+    -webkit-app-region: no-drag;
+}
+
+.qc-kbd {
+    background: #27272f;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    padding: 0px 4px;
+    border-radius: 3px;
+    font-family: monospace;
+    font-size: 9.5px;
+    color: #9ca3af;
+}
+
+.qc-detected-info {
+    background: var(--background-secondary);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 16px;
+    font-size: 12.5px;
+    line-height: 1.5;
+}
+
+.qc-detected-line {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+}
+
+.qc-detected-daily {
+    display: grid;
+    grid-template-columns: 105px minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+}
+
+.qc-detected-daily-label {
+    white-space: nowrap;
+}
+
+.qc-detected-daily-details {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.qc-detected-daily-details code {
+    overflow-wrap: anywhere;
+}
