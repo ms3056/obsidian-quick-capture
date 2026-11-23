@@ -8,231 +8,36 @@ import {
     PluginSettingTab,
     Modal,
     Setting,
+    MarkdownRenderChild,
     TFile,
     normalizePath,
-    moment
+    moment,
+    setIcon,
+    getIcon
 } from 'obsidian';
 
-export type CaptureDestination = 'daily' | 'journal' | 'gratitude' | 'win' | 'inbox' | 'task';
+import type { CaptureDestination, TaskPriority, PurgeAgeUnit, EditableTask, TaskCandidate, RenderedTaskSignals } from './task-model';
+import {
+    TASK_LINE_REGEX,
+    normalizeTaskLineOrder,
+    repositionTaskKeywordTag,
+    organizeTaskListContent,
+    findDetailIndex,
+    parseEditableTask,
+    buildEditedTaskLine,
+    extractDetailText,
+    rankTaskCandidates,
+    dueBucketFromIso,
+    priorityNameFromCode,
+    priorityCodeFromTaskPriority,
+    TASK_PRIORITIES,
+    TASK_PRIORITY_EMOJI,
+    TASK_PRIORITY_META
+} from './task-model';
+export type { CaptureDestination, TaskPriority, PurgeAgeUnit } from './task-model';
 
-export type TaskPriority = 'none' | 'high' | 'medium' | 'low';
-export type PurgeAgeUnit = 'days' | 'months';
+type PendingTaskEdit = EditableTask & { path: string; line: number; originalLine: string };
 
-interface OrganizedTaskBlock {
-    lines: string[];
-    priority: number;
-    date: string | null;
-    completed: boolean;
-    originalIndex: number;
-}
-
-const TASK_LINE_REGEX = /^(\s*)[-*+]\s+\[([^\]]+)\]/;
-
-function getTaskPriorityOrder(taskLine: string): number {
-    if (taskLine.includes('🔺')) return 0;
-    if (taskLine.includes('⏫')) return 1;
-    if (taskLine.includes('🔼')) return 2;
-    if (taskLine.includes('🔽')) return 3;
-    if (taskLine.includes('⏬')) return 4;
-    return 5;
-}
-
-const TASK_FIELD_ORDER: Record<string, number> = {
-    '🔺': 0,
-    '⏫': 1,
-    '🔼': 2,
-    '🔽': 3,
-    '⏬': 4,
-    '🛫': 10,
-    '⏳': 11,
-    '➕': 12,
-    '📅': 13,
-    '✅': 14,
-    '❌': 15
-};
-
-const STANDALONE_TASK_TAG_REGEX = /(?:^|[ \t]+)#task(?=$|[ \t]+)/gi;
-
-function extractStandaloneTaskTag(text: string): { cleaned: string; hasTaskTag: boolean } {
-    let hasTaskTag = false;
-    const cleaned = text
-        .replace(STANDALONE_TASK_TAG_REGEX, () => {
-            hasTaskTag = true;
-            return ' ';
-        })
-        .replace(/[ \t]+/g, ' ')
-        .trim();
-    return { cleaned, hasTaskTag };
-}
-
-function repositionTaskKeywordTag(line: string): string {
-    const taskMatch = line.match(/^(\s*[-*+]\s+\[[^\]]+\])(?:[ \t]+(.*))?$/);
-    if (!taskMatch) return line;
-
-    const prefix = taskMatch[1];
-    const body = taskMatch[2] ?? '';
-    const { cleaned: bodyWithoutTaskTag, hasTaskTag } = extractStandaloneTaskTag(body);
-    if (!hasTaskTag) return line;
-
-    const trailingMatch = bodyWithoutTaskTag.match(
-        /^([\s\S]*?)((?:(?:^|[ \t]+)(?:🔺|⏫|🔼|🔽|⏬|(?:🛫|⏳|➕|📅|✅|❌)(?:[ \t]+\d{4}-\d{2}-\d{2})?))+)$/u
-    );
-    const description = trailingMatch ? trailingMatch[1].trim() : bodyWithoutTaskTag;
-    const trailingFields = trailingMatch ? trailingMatch[2].replace(/[ \t]+/g, ' ').trim() : '';
-
-    return [prefix, description, '#task', trailingFields].filter(Boolean).join(' ');
-}
-
-function normalizeTaskLineOrder(line: string): string {
-    const taskMatch = line.match(/^(\s*[-*+]\s+\[[^\]]+\])(?:[ \t]+(.*))?$/);
-    if (!taskMatch) return line;
-
-    const prefix = taskMatch[1];
-    const body = taskMatch[2] ?? '';
-    const fields: { value: string; order: number; index: number }[] = [];
-    const rawDescription = body.replace(
-        /(🔺|⏫|🔼|🔽|⏬|🛫|⏳|➕|📅|✅|❌)(?:[ \t]+(\d{4}-\d{2}-\d{2}))?/gu,
-        (match: string, marker: string, date: string | undefined) => {
-            fields.push({
-                value: date ? `${marker} ${date}` : marker,
-                order: TASK_FIELD_ORDER[marker],
-                index: fields.length
-            });
-            return ' ';
-        }
-    ).replace(/[ \t]+/g, ' ').trim();
-
-    const { cleaned: description, hasTaskTag } = extractStandaloneTaskTag(rawDescription);
-
-    if (fields.length === 0 && !hasTaskTag) return line;
-
-    fields.sort((a, b) => a.order - b.order || a.index - b.index);
-    const priorities = fields.filter((field) => field.order < 10);
-    const metadata = fields.filter((field) => field.order >= 10);
-    return [
-        prefix,
-        ...priorities.map((field) => field.value),
-        description,
-        hasTaskTag ? '#task' : '',
-        ...metadata.map((field) => field.value)
-    ]
-        .filter(Boolean)
-        .join(' ');
-}
-
-function getTaskSortDate(taskLine: string): string | null {
-    for (const emoji of ['📅', '⏳', '🛫']) {
-        const match = taskLine.match(new RegExp(`${emoji}\\s*(\\d{4}-\\d{2}-\\d{2})`));
-        if (match) return match[1];
-    }
-    return null;
-}
-
-function sortTaskBlocks(blocks: OrganizedTaskBlock[]): OrganizedTaskBlock[] {
-    return blocks.sort((a, b) => {
-        if (a.priority !== b.priority) return a.priority - b.priority;
-        if (a.date && b.date && a.date !== b.date) return a.date.localeCompare(b.date);
-        if (a.date && !b.date) return -1;
-        if (!a.date && b.date) return 1;
-        return a.originalIndex - b.originalIndex;
-    });
-}
-
-function organizeTaskListContent(
-    content: string,
-    insertPosition: 'append' | 'prepend',
-    normalizeTaskOrder = false
-): string {
-    const lineEnding = content.includes('\r\n') ? '\r\n' : '\n';
-    const frontmatterMatch = content.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/);
-    const frontmatter = frontmatterMatch?.[0] ?? '';
-    const body = content.slice(frontmatter.length);
-    const lines = body.split(/\r?\n/);
-    const organizedLines: string[] = [];
-    let index = 0;
-
-    while (index < lines.length) {
-        const firstTask = lines[index].match(TASK_LINE_REGEX);
-        if (!firstTask) {
-            organizedLines.push(lines[index]);
-            index++;
-            continue;
-        }
-
-        const baseIndent = firstTask[1].length;
-        const blocks: OrganizedTaskBlock[] = [];
-        let currentBlock: OrganizedTaskBlock | null = null;
-        let originalIndex = 0;
-
-        while (index < lines.length) {
-            const taskMatch = lines[index].match(TASK_LINE_REGEX);
-            if (taskMatch) {
-                if (!currentBlock || taskMatch[1].length <= baseIndent) {
-                    if (currentBlock) blocks.push(currentBlock);
-                    currentBlock = {
-                        lines: [lines[index]],
-                        priority: getTaskPriorityOrder(lines[index]),
-                        date: getTaskSortDate(lines[index]),
-                        completed: taskMatch[2].toLowerCase() === 'x',
-                        originalIndex: originalIndex++
-                    };
-                } else {
-                    currentBlock.lines.push(lines[index]);
-                }
-                index++;
-                continue;
-            }
-
-            if (lines[index].trim() === '') {
-                let nextNonBlank = index;
-                while (nextNonBlank < lines.length && lines[nextNonBlank].trim() === '') {
-                    nextNonBlank++;
-                }
-                if (
-                    nextNonBlank < lines.length &&
-                    TASK_LINE_REGEX.test(lines[nextNonBlank])
-                ) {
-                    index = nextNonBlank;
-                    continue;
-                }
-                break;
-            }
-
-            if (currentBlock && /^\s+\S/.test(lines[index])) {
-                currentBlock.lines.push(lines[index]);
-                index++;
-                continue;
-            }
-            break;
-        }
-        if (currentBlock) blocks.push(currentBlock);
-
-        const completed = sortTaskBlocks(blocks.filter((block) => block.completed));
-        const incomplete = sortTaskBlocks(blocks.filter((block) => !block.completed));
-        const ordered = insertPosition === 'append'
-            ? [...completed, ...incomplete]
-            : [...incomplete, ...completed];
-
-        ordered.forEach((block, blockIndex) => {
-            if (blockIndex > 0) {
-                const previousBlock = ordered[blockIndex - 1];
-                if (
-                    previousBlock.completed !== block.completed ||
-                    (!block.completed && previousBlock.priority !== block.priority)
-                ) {
-                    organizedLines.push('');
-                }
-            }
-            organizedLines.push(
-                ...(normalizeTaskOrder
-                    ? block.lines.map(normalizeTaskLineOrder)
-                    : block.lines.map(repositionTaskKeywordTag))
-            );
-        });
-    }
-
-    return `${frontmatter}${organizedLines.join(lineEnding).replace(/(?:\r?\n)*$/, '')}${lineEnding}`;
-}
 
 function purgeCompletedTasksContent(
     content: string,
@@ -403,6 +208,27 @@ export const EMBEDDED_STANDALONE_CSS = `/* =====================================
     margin-left: 3px;
     opacity: 0.75;
     font-weight: 700;
+}
+.qc-pill svg,
+.qc-top-close svg,
+.qc-btn-submit svg,
+.qc-cal-nav-btn svg {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2;
+    flex: 0 0 auto;
+}
+.qc-pill-clear svg {
+    width: 12px;
+    height: 12px;
+}
+.qc-top-title svg {
+    width: 15px;
+    height: 15px;
+    stroke-width: 2;
+    color: #c8ad55;
+    opacity: 0.85;
+    flex: 0 0 auto;
 }
 
 .qc-pill .qc-pill-clear:hover {
@@ -609,6 +435,10 @@ export const EMBEDDED_STANDALONE_CSS = `/* =====================================
 }
 
 .qc-cal-type-tab {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
     border: none;
     background: transparent;
     color: #9ca3af;
@@ -618,6 +448,13 @@ export const EMBEDDED_STANDALONE_CSS = `/* =====================================
     border-radius: 5px;
     cursor: pointer;
 }
+.qc-cal-type-tab svg,
+.qc-cal-preset-btn svg {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2;
+    flex: 0 0 auto;
+}
 
 .qc-cal-type-tab.is-active {
     background: #8b5cf6;
@@ -626,17 +463,18 @@ export const EMBEDDED_STANDALONE_CSS = `/* =====================================
 
 .qc-cal-presets {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 4px;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
 }
 
 .qc-cal-preset-btn {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 4px 7px;
+    justify-content: center;
+    gap: 5px;
+    padding: 4px 5px;
     border-radius: 6px;
-    font-size: 11px;
+    font-size: 10.5px;
     background: #27272f;
     color: #f4f4f6;
     border: 1px solid transparent;
@@ -651,6 +489,19 @@ export const EMBEDDED_STANDALONE_CSS = `/* =====================================
 .qc-cal-preset-sub {
     font-size: 10px;
     color: #9ca3af;
+}
+
+.qc-cal-quick-chip {
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    white-space: nowrap;
+    line-height: 1.15;
+    padding: 3px 2px;
+}
+.qc-cal-quick-chip .qc-cal-preset-sub {
+    font-size: 9.5px;
+    line-height: 1.1;
 }
 
 .qc-cal-header {
@@ -729,25 +580,33 @@ export const EMBEDDED_STANDALONE_CSS = `/* =====================================
 }
 
 .qc-cal-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
     gap: 6px;
+    align-items: center;
     padding-top: 5px;
     border-top: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .qc-cal-native-input {
+    grid-column: 1 / span 2;
+    min-width: 0;
+    width: 100%;
     font-size: 11px;
     padding: 2px 6px;
     border-radius: 5px;
     border: 1px solid rgba(255, 255, 255, 0.14);
     background: #27272f;
     color: #f4f4f6;
-    flex: 1;
+}
+.qc-cal-native-input::-webkit-calendar-picker-indicator {
+    display: none !important;
+    -webkit-appearance: none !important;
+    appearance: none !important;
 }
 
 .qc-cal-clear-btn {
+    grid-column: 3;
     font-size: 11px;
     padding: 3px 8px;
     border-radius: 5px;
@@ -795,8 +654,20 @@ export const EMBEDDED_STANDALONE_CSS = `/* =====================================
 }
 `;
 
+/** Obsidian's own Lucide SVG, serialized for injection into the standalone HTML. */
+export function obsidianIconHtml(name: string): string {
+    const icon = getIcon(name);
+    return icon ? icon.outerHTML : '';
+}
+
 // Inline Lucide SVG icons for the standalone OS window.
 export const LUCIDE_SVGS: Record<string, string> = {
+    'chevrons-up': `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="m17 11-5-5-5 5"/><path d="m17 18-5-5-5 5"/></svg>`,
+    'chevron-up': `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>`,
+    'minus': `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg>`,
+    'priority-chevron-down': `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`,
+    'chevrons-down': `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="m17 6-5 5-5-5"/><path d="m17 13-5 5-5-5"/></svg>`,
+    'circle': `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/></svg>`,
     'calendar-with-checkmark': `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="4" rx="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/><path d="m9 16 2 2 4-4"/></svg>`,
     'book-open': `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>`,
     'heart': `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>`,
@@ -969,6 +840,9 @@ export default class QuickCapturePlugin extends Plugin {
     private isUnloading = false;
     private organizeTasksCommandRegistered = false;
     public currentStandaloneDest: CaptureDestination = 'inbox';
+    private pendingEdit: PendingTaskEdit | null = null;
+    private globalTaskObserver: MutationObserver | null = null;
+    private observedTaskRows = new WeakSet<HTMLElement>();
 
     public detectedInfo: {
         inboxFound?: string;
@@ -1019,6 +893,19 @@ export default class QuickCapturePlugin extends Plugin {
             }
         });
 
+        this.addCommand({
+            id: 'quick-capture-edit-task',
+            name: 'Quick Capture: Edit Task at Cursor',
+            editorCheckCallback: (checking, editor, ctx) => {
+                if (checking) {
+                    return ctx instanceof MarkdownView && !!ctx.file &&
+                        TASK_LINE_REGEX.test(editor.getLine(editor.getCursor().line));
+                }
+                void this.openTaskEditor(editor, ctx.file ?? null);
+                return true;
+            }
+        });
+
         (Object.keys(DESTINATION_META) as CaptureDestination[]).forEach((dest) => {
             this.addCommand({
                 id: `open-quick-capture-${dest}`,
@@ -1029,6 +916,26 @@ export default class QuickCapturePlugin extends Plugin {
             });
         });
 
+        this.registerMarkdownPostProcessor((el, ctx) => {
+            // Tasks renders its <li> elements asynchronously, often AFTER this hook.
+            // Detect the code-block container instead, then observe it for the rows.
+            const isTasksBlock = el.classList.contains('block-language-tasks') ||
+                !!el.querySelector('.block-language-tasks') ||
+                !!el.querySelector('code.language-tasks');
+            if (!isTasksBlock) return;
+            const wrap = () => {
+                this.wrapTaskDetails(el);
+                this.injectEditButtons(el, ctx.sourcePath);
+            };
+            wrap();
+            const observer = new MutationObserver(wrap);
+            observer.observe(el, { childList: true, subtree: true, characterData: true });
+            const child = new MarkdownRenderChild(el);
+            child.register(() => observer.disconnect());
+            ctx.addChild(child);
+        }, 100);
+
+        this.startGlobalTaskObserver();
         this.updateOrganizeTasksCommand();
         this.addSettingTab(new QuickCaptureSettingTab(this.app, this));
     }
@@ -1039,6 +946,8 @@ export default class QuickCapturePlugin extends Plugin {
     }
 
     private cleanupRuntimeResources() {
+        this.globalTaskObserver?.disconnect();
+        this.globalTaskObserver = null;
         this.unregisterGlobalShortcut();
         this.destroyStandaloneWindow();
         this.stopLoopbackServer();
@@ -1084,6 +993,265 @@ export default class QuickCapturePlugin extends Plugin {
             console.error('QuickCapture: Failed to organize tasks:', err);
             new Notice(`Could not organize tasks in ${targetPath}. Check the console for details.`);
         }
+    }
+
+    /**
+     * Wrap the "| detail" suffix in a classed span so CSS can style it.
+     * Tasks renders descriptions asynchronously, so a per-block observer
+     * re-runs this after each query refresh; the marker makes it idempotent.
+     */
+    private wrapTaskDetails(root: HTMLElement) {
+        const containers = Array.from(
+            root.querySelectorAll<HTMLElement>('.plugin-tasks-list-item .task-description')
+        );
+        if (containers.length === 0) {
+            containers.push(...Array.from(root.querySelectorAll<HTMLElement>('.task-list-item .task-description')));
+        }
+        for (const container of containers) {
+            if (container.hasAttribute('data-qc-detail-wrapped')) continue;
+            const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+            let hitNode: Text | null = null;
+            let hitIndex = -1;
+            while (walker.nextNode()) {
+                const node = walker.currentNode as Text;
+                const index = findDetailIndex(node.textContent ?? '');
+                if (index >= 0) {
+                    hitNode = node;
+                    hitIndex = index;
+                    break;
+                }
+            }
+            if (!hitNode) {
+                // Tags-only task: still give them their own second line.
+                const tags = Array.from(container.querySelectorAll<HTMLElement>('.tag'));
+                const rowOwner = container.closest<HTMLElement>('.plugin-tasks-list-item');
+                if (tags.length === 0 || !rowOwner || rowOwner.querySelector('.qc-detail-row')) continue;
+                const tagRow = document.createElement('span');
+                tagRow.className = 'qc-detail-row';
+                for (const tag of tags) tagRow.appendChild(tag);
+                rowOwner.appendChild(tagRow);
+                container.setAttribute('data-qc-detail-wrapped', '1');
+                continue;
+            }
+
+            const row = document.createElement('span');
+            row.className = 'qc-detail-row';
+            const detail = document.createElement('span');
+            detail.className = 'qc-task-detail';
+            detail.textContent = extractDetailText((hitNode.textContent ?? '').slice(hitIndex + 1));
+            row.appendChild(detail);
+
+            // Put the detail row on the <li> itself so it spans the full width:
+            // title + dates/buttons on line 1, detail + tags on line 2.
+            const li = container.closest<HTMLElement>('.plugin-tasks-list-item');
+            if (!li) continue;
+            li.appendChild(row);
+
+            const before = document.createTextNode((hitNode.textContent ?? '').slice(0, hitIndex));
+            hitNode.parentNode?.insertBefore(before, hitNode);
+
+            // Inline Markdown (bold, links, code) lives in sibling nodes: move it
+            // into the detail. Tags go in the same row, pinned to the right.
+            let sibling = hitNode.nextSibling;
+            while (sibling) {
+                const next = sibling.nextSibling;
+                const isTag = sibling instanceof HTMLElement && sibling.classList.contains('tag');
+                if (isTag) row.appendChild(sibling);
+                else detail.appendChild(sibling);
+                sibling = next;
+            }
+            hitNode.parentNode?.removeChild(hitNode);
+            // Tags can render outside the text node's sibling chain; pull any
+            // remaining ones from this task's description into the detail row.
+            for (const tag of Array.from(container.querySelectorAll<HTMLElement>('.tag'))) {
+                if (!tag.closest('.qc-detail-row')) row.appendChild(tag);
+            }
+            container.setAttribute('data-qc-detail-wrapped', '1');
+        }
+    }
+
+    private async openTaskEditor(editor: Editor, file: TFile | null) {
+        if (!file || file.extension !== 'md') {
+            new Notice('Open a Markdown note to edit a task.');
+            return;
+        }
+        const line = editor.getCursor().line;
+        const originalLine = editor.getLine(line);
+        if (!TASK_LINE_REGEX.test(originalLine) || !parseEditableTask(originalLine)) {
+            new Notice('Put the cursor on a task line (for example "- [ ] ...").');
+            return;
+        }
+        await this.openTaskEditorAt(file, line, originalLine);
+    }
+
+    private async openTaskEditorAt(file: TFile, line: number, originalLine: string) {
+        const parsed = parseEditableTask(originalLine);
+        if (!parsed) {
+            new Notice('That task could not be parsed for editing.');
+            return;
+        }
+        this.pendingEdit = { ...parsed, path: file.path, line, originalLine };
+        await this.triggerGlobalQuickCapture('task', this.pendingEdit);
+    }
+
+    /**
+     * Safety net: if the post-processor hook misses a Tasks block, catch newly
+     * rendered rows from a single plugin-level observer. One observer only;
+     * WeakSet prevents repeat work and it is disconnected on plugin unload.
+     */
+    private startGlobalTaskObserver() {
+        if (typeof document === 'undefined' || !document.body) return;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const process = () => {
+            const path = this.app.workspace.getActiveFile()?.path ?? '';
+            if (!this.isTasklistNote(path)) return;
+            for (const li of Array.from(document.querySelectorAll<HTMLElement>('.plugin-tasks-list-item'))) {
+                if (this.observedTaskRows.has(li)) continue;
+                this.observedTaskRows.add(li);
+                const block = li.closest<HTMLElement>('.block-language-tasks') ?? li;
+                this.wrapTaskDetails(block);
+                this.injectEditButtons(block, path);
+            }
+        };
+        const schedule = () => {
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(process, 50);
+        };
+        this.globalTaskObserver = new MutationObserver(schedule);
+        this.globalTaskObserver.observe(document.body, { childList: true, subtree: true });
+        schedule();
+    }
+
+    private isTasklistNote(path: string): boolean {
+        const file = this.app.vault.getAbstractFileByPath(normalizePath(path || ''));
+        if (!(file instanceof TFile)) return false;
+        const classes = (this.app.metadataCache.getFileCache(file)?.frontmatter as any)?.cssclasses;
+        if (Array.isArray(classes)) {
+            return classes.some((c: unknown) => String(c).trim().toLowerCase() === 'tasklist');
+        }
+        return typeof classes === 'string' &&
+            classes.split(/[\s,]+/).some((c) => c.toLowerCase() === 'tasklist');
+    }
+
+    /** Inject our own edit button into rendered Tasks queries in tasklist notes. */
+    private injectEditButtons(root: HTMLElement, sourcePath: string) {
+        if (!this.isTasklistNote(sourcePath)) return;
+        const rows = Array.from(root.querySelectorAll<HTMLElement>('.plugin-tasks-list-item'));
+        if (root.matches?.('.plugin-tasks-list-item')) rows.unshift(root);
+        for (const li of rows) {
+            if (li.querySelector('.qc-edit-btn') || li.querySelector('.tasks-edit')) continue;
+            // A span (not <button>) avoids Obsidian's form-field background/border.
+            const button = document.createElement('span');
+            button.className = 'qc-edit-btn';
+            button.setAttribute('role', 'button');
+            button.tabIndex = 0;
+            button.title = 'Edit in Quick Capture';
+            setIcon(button, 'zap');
+            const activate = (event: Event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                void this.openTaskEditorFromRenderedItem(li, sourcePath);
+            };
+            button.addEventListener('click', activate);
+            button.addEventListener('keydown', (event) => {
+                if ((event as KeyboardEvent).key === 'Enter' || (event as KeyboardEvent).key === ' ') {
+                    activate(event);
+                }
+            });
+            // Dedicated direct-child slot: it owns its own grid column on row 1,
+            // so it can never overlap Tasks' .task-extras/postpone controls.
+            let slot = li.querySelector<HTMLElement>(':scope > .qc-action-slot');
+            if (!slot) {
+                slot = document.createElement('span');
+                slot.className = 'qc-action-slot';
+                li.appendChild(slot);
+            }
+            slot.appendChild(button);
+        }
+    }
+
+    private readRenderedSignals(li: HTMLElement, sourcePath: string): RenderedTaskSignals {
+        return {
+            description: li.querySelector('.task-description')?.textContent?.trim() ?? '',
+            status: (li.getAttribute('data-task') ?? ' ').trim() || ' ',
+            priority: li.getAttribute('data-task-priority') ?? '',
+            dueBucket: li.getAttribute('data-task-due') ?? '',
+            sourcePath
+        };
+    }
+
+    /** Read Tasks' own cache, with a vault-scan fallback. Never modifies Tasks. */
+    private async getTaskCandidates(sourcePath: string): Promise<TaskCandidate[]> {
+        const today = moment().format('YYYY-MM-DD');
+        const tasksApi = (this.app as any).plugins?.plugins?.['obsidian-tasks-plugin'];
+        const tasks: any[] = typeof tasksApi?.getTasks === 'function' ? tasksApi.getTasks() : [];
+        const candidates: TaskCandidate[] = [];
+        for (const task of tasks) {
+            const path: string | undefined = task.path || task.taskLocation?.path;
+            const line: number | undefined = task.taskLocation?.lineNumber;
+            const originalLine: string | undefined = task.originalMarkdown;
+            if (!path || typeof line !== 'number' || !originalLine) continue;
+            candidates.push({
+                path, line, originalLine,
+                description: task.description || '',
+                status: (task.status?.symbol ?? ' ').trim() || ' ',
+                priority: priorityNameFromCode(String(task.priority ?? '3')),
+                dueBucket: task.due && typeof task.due.format === 'function'
+                    ? dueBucketFromIso(task.due.format('YYYY-MM-DD'), today) : ''
+            });
+        }
+        if (candidates.length > 0) return candidates;
+
+        for (const file of this.app.vault.getMarkdownFiles()) {
+            let content: string;
+            try {
+                content = await this.app.vault.cachedRead(file);
+            } catch {
+                continue;
+            }
+            content.split(/\r?\n/).forEach((lineText, index) => {
+                const match = lineText.match(TASK_LINE_REGEX);
+                if (!match) return;
+                const parsed = parseEditableTask(lineText);
+                if (!parsed) return;
+                const code = priorityCodeFromTaskPriority(parsed.priority);
+                candidates.push({
+                    path: file.path,
+                    line: index,
+                    originalLine: lineText,
+                    description: parsed.text,
+                    status: (match[2] ?? ' ').trim() || ' ',
+                    priority: priorityNameFromCode(code),
+                    dueBucket: parsed.due ? dueBucketFromIso(parsed.due, today) : ''
+                });
+            });
+        }
+        return candidates;
+    }
+
+    private async openAtCandidate(candidate: TaskCandidate) {
+        const file = this.app.vault.getAbstractFileByPath(normalizePath(candidate.path));
+        if (!(file instanceof TFile)) {
+            new Notice(`Source note not found: ${candidate.path}`);
+            return;
+        }
+        await this.openTaskEditorAt(file, candidate.line, candidate.originalLine);
+    }
+
+    private async openTaskEditorFromRenderedItem(li: HTMLElement, sourcePath: string) {
+        const signals = this.readRenderedSignals(li, sourcePath);
+        const ranked = rankTaskCandidates(signals, await this.getTaskCandidates(sourcePath));
+        if (ranked.length === 0) {
+            new Notice('Could not find the source task for editing.');
+            return;
+        }
+        if (ranked.length === 1) {
+            await this.openAtCandidate(ranked[0]);
+            return;
+        }
+        new TaskEditPickerModal(this.app, ranked, (candidate) => {
+            void this.openAtCandidate(candidate);
+        }).open();
     }
 
     private async moveTaskAtCursorToMasterList(editor: Editor, activeFile: TFile | null) {
@@ -1360,6 +1528,7 @@ export default class QuickCapturePlugin extends Plugin {
 
                     try {
                         if (route === '/api/close') {
+                            this.pendingEdit = null;
                             this.hideStandaloneWindowOnly();
                             sendJson(200, { ok: true });
                             return;
@@ -1430,17 +1599,29 @@ export default class QuickCapturePlugin extends Plugin {
 
                         if (route === '/api/capture') {
                             const validPriority = data.taskPriority === undefined ||
-                                ['none', 'high', 'medium', 'low'].includes(data.taskPriority);
+                                TASK_PRIORITIES.includes(data.taskPriority);
                             const validDates = isOptionalIsoDate(data.taskDueDate) &&
                                 isOptionalIsoDate(data.taskScheduledDate) &&
                                 isOptionalIsoDate(data.taskStartDate) &&
                                 isOptionalIsoDate(data.targetDailyDate);
+                            const e = data.edit;
+                            const validEdit = e === undefined || (
+                                e && typeof e === 'object' &&
+                                typeof e.path === 'string' &&
+                                Number.isInteger(e.line) && e.line >= 0 &&
+                                typeof e.originalLine === 'string' &&
+                                (e.priorityEmoji === undefined || typeof e.priorityEmoji === 'string') &&
+                                (e.scheduled === undefined || typeof e.scheduled === 'string') &&
+                                (e.created === undefined || typeof e.created === 'string') &&
+                                (e.preserved === undefined || (Array.isArray(e.preserved) && e.preserved.every((v: unknown) => typeof v === 'string')))
+                            );
                             if (
                                 !isCaptureDestination(data.destination) ||
                                 typeof data.rawText !== 'string' ||
                                 data.rawText.length > MAX_CAPTURE_TEXT_LENGTH ||
                                 !validPriority ||
-                                !validDates
+                                !validDates ||
+                                !validEdit
                             ) {
                                 sendJson(400, { ok: false, error: 'Invalid capture request.' });
                                 return;
@@ -1501,7 +1682,8 @@ export default class QuickCapturePlugin extends Plugin {
         return {
             destination: this.currentStandaloneDest,
             settings: this.settings,
-            todayStr: moment().format('YYYY-MM-DD')
+            todayStr: moment().format('YYYY-MM-DD'),
+            edit: this.pendingEdit
         };
     }
 
@@ -1530,6 +1712,15 @@ export default class QuickCapturePlugin extends Plugin {
         taskStartDate?: string;
         taskPriority?: TaskPriority;
         targetDailyDate?: string;
+        edit?: {
+            path: string;
+            line: number;
+            originalLine: string;
+            priorityEmoji?: string;
+            scheduled?: string;
+            created?: string;
+            preserved?: string[];
+        };
     }) {
         if (!isCaptureDestination(payload.destination)) {
             throw new Error('Invalid capture destination.');
@@ -1538,6 +1729,36 @@ export default class QuickCapturePlugin extends Plugin {
         if (!rawText) return;
 
         const dest = payload.destination;
+
+        // Edit mode: replace the exact source line, never append a new task.
+        const pending = this.pendingEdit;
+        const edit = payload.edit;
+        if (dest === 'task' && edit && pending &&
+            edit.path === pending.path &&
+            edit.line === pending.line &&
+            edit.originalLine === pending.originalLine) {
+            try {
+                const updated = buildEditedTaskLine(pending.originalLine, {
+                    text: rawText,
+                    priority: payload.taskPriority ?? 'none',
+                    priorityEmoji: edit.priorityEmoji ?? '',
+                    start: payload.taskStartDate ?? '',
+                    scheduled: edit.scheduled ?? '',
+                    created: edit.created ?? '',
+                    due: payload.taskDueDate ?? '',
+                    preserved: edit.preserved ?? [],
+                    normalize: this.settings.normalizeTaskOrder
+                });
+                await this.updateTaskLineInFile(pending.path, pending.line, pending.originalLine, updated);
+                new Notice('Task updated');
+            } catch (err) {
+                new Notice(`Could not update task: ${(err as Error).message}`);
+            }
+            this.pendingEdit = null;
+            return;
+        }
+        this.pendingEdit = null;
+
         if (this.settings.rememberLastDestination) {
             this.settings.lastUsedDestination = dest;
             await this.saveSettings();
@@ -1569,9 +1790,8 @@ export default class QuickCapturePlugin extends Plugin {
                 parts.push(taskAutoTag.startsWith('#') ? taskAutoTag : `#${taskAutoTag}`);
             }
 
-            if (payload.taskPriority === 'high') parts.push('⏫');
-            else if (payload.taskPriority === 'medium') parts.push('🔼');
-            else if (payload.taskPriority === 'low') parts.push('🔽');
+            const priorityEmoji = TASK_PRIORITY_EMOJI[payload.taskPriority ?? 'none'];
+            if (priorityEmoji) parts.push(priorityEmoji);
 
             if (payload.taskStartDate) parts.push(`🛫 ${payload.taskStartDate}`);
             if (payload.taskScheduledDate) parts.push(`⏳ ${payload.taskScheduledDate}`);
@@ -1694,6 +1914,23 @@ export default class QuickCapturePlugin extends Plugin {
         });
     }
 
+    private async updateTaskLineInFile(
+        filePath: string,
+        line: number,
+        original: string,
+        updated: string
+    ) {
+        const file = this.app.vault.getAbstractFileByPath(normalizePath(filePath));
+        if (!(file instanceof TFile)) throw new Error('Source note not found');
+        await this.app.vault.process(file, (content) => {
+            const lines = content.split(/\r?\n/);
+            const idx = lines[line] === original ? line : lines.indexOf(original);
+            if (idx === -1) throw new Error('Task line changed since the editor opened');
+            lines[idx] = updated;
+            return lines.join(content.includes('\r\n') ? '\r\n' : '\n');
+        });
+    }
+
     public async writeLineToFile(
         filePath: string,
         lineToInsert: string,
@@ -1773,7 +2010,8 @@ export default class QuickCapturePlugin extends Plugin {
      * Opens Quick Capture as an independent OS floating window WITHOUT ever touching,
      * restoring, showing, or hiding the main Obsidian window!
      */
-    public async triggerGlobalQuickCapture(forcedDest?: CaptureDestination) {
+    public async triggerGlobalQuickCapture(forcedDest?: CaptureDestination, edit?: PendingTaskEdit) {
+        this.pendingEdit = edit ?? null;
         const initialDest = forcedDest
             ? forcedDest
             : this.settings.rememberLastDestination
@@ -2031,9 +2269,21 @@ export default class QuickCapturePlugin extends Plugin {
      * - Keyboard shortcuts (Tab, Ctrl+0/J/G/W/I/T, Ctrl+D, Enter to Save, Esc to Close)
      */
     private buildStandaloneBrowserWindowHtml(): string {
+        const calIconNames: Record<string, string> = {
+            due: 'calendar', start: 'plane-takeoff',
+            today: 'sun', tomorrow: 'sunrise', plus3: 'calendar-plus',
+            weekend: 'sofa', nextMon: 'arrow-right-to-line', plus2w: 'calendar-range',
+            zap: 'zap', x: 'x', cornerDownLeft: 'corner-down-left',
+            calendarDays: 'calendar-days', chevronLeft: 'chevron-left',
+            dot: 'circle', chevronRight: 'chevron-right', paperclip: 'paperclip'
+        };
+        const calIcons: Record<string, string> = {};
+        for (const key in calIconNames) calIcons[key] = obsidianIconHtml(calIconNames[key]);
+        const calIconsJson = serializeForInlineScript(calIcons);
         const initialStateJson = serializeForInlineScript(this.getBridgeStatePayload());
         const svgsJson = serializeForInlineScript(LUCIDE_SVGS);
         const destMetaJson = serializeForInlineScript(DESTINATION_META);
+        const priorityMetaJson = serializeForInlineScript(TASK_PRIORITY_META);
 
         return `<!DOCTYPE html>
 <html>
@@ -2060,6 +2310,8 @@ html, body {
     history.replaceState(null, '', '/');
     const SVGS = ${svgsJson};
     const DEST_META = ${destMetaJson};
+    const PRIORITY_META = ${priorityMetaJson};
+    const UI_ICONS = ${calIconsJson};
     let state = ${initialStateJson};
 
     let destination = state.destination || 'inbox';
@@ -2069,6 +2321,8 @@ html, body {
     let taskDueDate = '';
     let taskStartDate = '';
     let taskPriority = 'none';
+    let editMode = null;
+    let originalPriorityEmoji = '';
     let targetDailyDate = todayStr;
 
     let activeCalField = 'due';
@@ -2089,6 +2343,15 @@ html, body {
         }
         parent.appendChild(node);
         return node;
+    }
+
+    function priorityIconHtml(id) {
+        const meta = PRIORITY_META[id] || PRIORITY_META.none;
+        const svg = SVGS[meta.icon] || '';
+        return svg.replace('<svg ', '<svg style="color:' + meta.color + '" ');
+    }
+    function priorityButtonHtml(id, label) {
+        return priorityIconHtml(id) + '<span>' + label + '</span>';
     }
 
     function pad2(n) { return n < 10 ? '0' + n : '' + n; }
@@ -2163,8 +2426,20 @@ html, body {
         taskDueDate = '';
         taskStartDate = '';
         taskPriority = 'none';
+        originalPriorityEmoji = '';
         targetDailyDate = todayStr;
-        if (textAreaEl) textAreaEl.value = '';
+        editMode = newState && newState.edit ? newState.edit : null;
+        if (editMode) {
+            destination = 'task';
+            if (textAreaEl) textAreaEl.value = editMode.text || '';
+            taskDueDate = editMode.due || '';
+            taskStartDate = editMode.start || '';
+            taskPriority = editMode.priority || 'none';
+            originalPriorityEmoji = editMode.priorityEmoji || '';
+        }
+        if (textAreaEl && !editMode) textAreaEl.value = '';
+        if (topTitle) topTitle.innerHTML = UI_ICONS.zap + '<span>' + (editMode ? 'EDIT TASK' : 'QUICK CAPTURE') + '</span>';
+        if (submitBtn) submitBtn.innerHTML = '<span>' + (editMode ? 'Save' : 'Capture') + '</span>' + UI_ICONS.cornerDownLeft;
         closeCalPopover();
         closeDestMenu();
         setDestination(destination, false);
@@ -2226,27 +2501,34 @@ html, body {
         pillsRowEl.innerHTML = '';
         if (destination === 'task') {
             if (taskDueDate) {
-                const p = el(pillsRowEl, 'div', 'qc-pill', '📅 Due: ' + friendlyDate(taskDueDate));
-                const c = el(p, 'span', 'qc-pill-clear', '×');
+                const p = el(pillsRowEl, 'div', 'qc-pill');
+                p.innerHTML = UI_ICONS.due + '<span>Due: ' + friendlyDate(taskDueDate) + '</span>';
+                const c = el(p, 'span', 'qc-pill-clear');
+                c.innerHTML = UI_ICONS.x;
                 c.onclick = (e) => { e.stopPropagation(); taskDueDate = ''; renderPills(); updateTargetSubtitle(); };
                 p.onclick = (e) => { e.stopPropagation(); toggleCalPopover('due'); };
             }
             if (taskStartDate) {
-                const p = el(pillsRowEl, 'div', 'qc-pill', '🛫 Start: ' + friendlyDate(taskStartDate));
-                const c = el(p, 'span', 'qc-pill-clear', '×');
+                const p = el(pillsRowEl, 'div', 'qc-pill');
+                p.innerHTML = UI_ICONS.start + '<span>Start: ' + friendlyDate(taskStartDate) + '</span>';
+                const c = el(p, 'span', 'qc-pill-clear');
+                c.innerHTML = UI_ICONS.x;
                 c.onclick = (e) => { e.stopPropagation(); taskStartDate = ''; renderPills(); updateTargetSubtitle(); };
                 p.onclick = (e) => { e.stopPropagation(); toggleCalPopover('start'); };
             }
             if (taskPriority !== 'none') {
-                const map = { high: '⏫ High Priority', medium: '🔼 Medium Priority', low: '🔽 Low Priority' };
-                const p = el(pillsRowEl, 'div', 'qc-pill', map[taskPriority]);
-                const c = el(p, 'span', 'qc-pill-clear', '×');
-                c.onclick = (e) => { e.stopPropagation(); taskPriority = 'none'; renderPills(); updateTargetSubtitle(); };
+                const p = el(pillsRowEl, 'div', 'qc-pill');
+                p.innerHTML = priorityIconHtml(taskPriority) + '<span>' + PRIORITY_META[taskPriority].label + ' Priority</span>';
+                const c = el(p, 'span', 'qc-pill-clear');
+                c.innerHTML = UI_ICONS.x;
+                c.onclick = (e) => { e.stopPropagation(); taskPriority = 'none'; originalPriorityEmoji = ''; renderPills(); updateTargetSubtitle(); };
             }
         } else if (['daily', 'journal', 'gratitude', 'win'].includes(destination)) {
             if (targetDailyDate !== todayStr) {
-                const p = el(pillsRowEl, 'div', 'qc-pill', '📆 Target Day: ' + friendlyDate(targetDailyDate));
-                const c = el(p, 'span', 'qc-pill-clear', '×');
+                const p = el(pillsRowEl, 'div', 'qc-pill');
+                p.innerHTML = UI_ICONS.calendarDays + '<span>Target Day: ' + friendlyDate(targetDailyDate) + '</span>';
+                const c = el(p, 'span', 'qc-pill-clear');
+                c.innerHTML = UI_ICONS.x;
                 c.onclick = (e) => { e.stopPropagation(); targetDailyDate = todayStr; renderPills(); updateTargetSubtitle(); };
                 p.onclick = (e) => { e.stopPropagation(); toggleCalPopover('dailyTarget'); };
             }
@@ -2309,8 +2591,10 @@ html, body {
 
         if (destination === 'task') {
             const tabs = el(pop, 'div', 'qc-cal-type-tabs');
-            const dueBtn = el(tabs, 'button', 'qc-cal-type-tab ' + (activeCalField === 'due' ? 'is-active' : ''), '📅 Due Date', { type: 'button' });
-            const startBtn = el(tabs, 'button', 'qc-cal-type-tab ' + (activeCalField === 'start' ? 'is-active' : ''), '🛫 Start Date', { type: 'button' });
+            const dueBtn = el(tabs, 'button', 'qc-cal-type-tab ' + (activeCalField === 'due' ? 'is-active' : ''), undefined, { type: 'button' });
+            dueBtn.innerHTML = (UI_ICONS.due || '') + '<span>Due Date</span>';
+            const startBtn = el(tabs, 'button', 'qc-cal-type-tab ' + (activeCalField === 'start' ? 'is-active' : ''), undefined, { type: 'button' });
+            startBtn.innerHTML = (UI_ICONS.start || '') + '<span>Start Date</span>';
             dueBtn.onclick = () => { activeCalField = 'due'; renderCalPopover(); };
             startBtn.onclick = () => { activeCalField = 'start'; renderCalPopover(); };
         }
@@ -2318,6 +2602,8 @@ html, body {
         const presetsGrid = el(pop, 'div', 'qc-cal-presets');
         const dToday = parseYMD(todayStr);
         const dTom = new Date(dToday.getFullYear(), dToday.getMonth(), dToday.getDate() + 1);
+        const d3 = new Date(dToday.getFullYear(), dToday.getMonth(), dToday.getDate() + 3);
+        const d14 = new Date(dToday.getFullYear(), dToday.getMonth(), dToday.getDate() + 14);
         const daysToSat = (6 - dToday.getDay() + 7) % 7 || 7;
         const dSat = new Date(dToday.getFullYear(), dToday.getMonth(), dToday.getDate() + daysToSat);
         const daysToMon = (1 - dToday.getDay() + 7) % 7 || 7;
@@ -2328,13 +2614,15 @@ html, body {
         const monthsFull = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
         [
-            { label: '★ Today', sub: daysShort[dToday.getDay()], val: fmtYMD(dToday) },
-            { label: '☀ Tomorrow', sub: daysShort[dTom.getDay()], val: fmtYMD(dTom) },
-            { label: '🛋 Weekend', sub: monthsShort[dSat.getMonth()] + ' ' + dSat.getDate(), val: fmtYMD(dSat) },
-            { label: '⇥ Next Mon', sub: monthsShort[dMon.getMonth()] + ' ' + dMon.getDate(), val: fmtYMD(dMon) }
+            { icon: 'today', label: 'Today', sub: daysShort[dToday.getDay()], val: fmtYMD(dToday) },
+            { icon: 'tomorrow', label: 'Tomorrow', sub: daysShort[dTom.getDay()], val: fmtYMD(dTom) },
+            { icon: 'plus3', label: '+3 Days', sub: monthsShort[d3.getMonth()] + ' ' + d3.getDate(), val: fmtYMD(d3) },
+            { icon: 'weekend', label: 'Weekend', sub: monthsShort[dSat.getMonth()] + ' ' + dSat.getDate(), val: fmtYMD(dSat) },
+            { icon: 'nextMon', label: 'Next Mon', sub: monthsShort[dMon.getMonth()] + ' ' + dMon.getDate(), val: fmtYMD(dMon) },
+            { icon: 'plus2w', label: '+2 Weeks', sub: monthsShort[d14.getMonth()] + ' ' + d14.getDate(), val: fmtYMD(d14) }
         ].forEach((p) => {
-            const b = el(presetsGrid, 'button', 'qc-cal-preset-btn', undefined, { type: 'button' });
-            el(b, 'span', undefined, p.label);
+            const b = el(presetsGrid, 'button', 'qc-cal-preset-btn qc-cal-quick-chip', undefined, { type: 'button' });
+            b.innerHTML = (UI_ICONS[p.icon] || '') + '<span>' + p.label + '</span>';
             el(b, 'span', 'qc-cal-preset-sub', p.sub);
             b.onclick = () => setActiveCalVal(p.val);
         });
@@ -2342,9 +2630,12 @@ html, body {
         const hdr = el(pop, 'div', 'qc-cal-header');
         el(hdr, 'span', undefined, monthsFull[calViewMonth] + ' ' + calViewYear);
         const nav = el(hdr, 'div', 'qc-cal-nav');
-        const prev = el(nav, 'button', 'qc-cal-nav-btn', '◀', { type: 'button' });
-        const dot = el(nav, 'button', 'qc-cal-nav-btn', '●', { type: 'button' });
-        const next = el(nav, 'button', 'qc-cal-nav-btn', '▶', { type: 'button' });
+        const prev = el(nav, 'button', 'qc-cal-nav-btn', undefined, { type: 'button' });
+        prev.innerHTML = UI_ICONS.chevronLeft;
+        const dot = el(nav, 'button', 'qc-cal-nav-btn', undefined, { type: 'button' });
+        dot.innerHTML = UI_ICONS.dot;
+        const next = el(nav, 'button', 'qc-cal-nav-btn', undefined, { type: 'button' });
+        next.innerHTML = UI_ICONS.chevronRight;
 
         prev.onclick = () => {
             calViewMonth--;
@@ -2383,15 +2674,19 @@ html, body {
         if (destination === 'task') {
             const prioRow = el(pop, 'div', 'qc-cal-presets');
             [
-                { id: 'high', label: '⏫ High' },
-                { id: 'medium', label: '🔼 Med' },
-                { id: 'low', label: '🔽 Low' },
-                { id: 'none', label: '○ Normal' }
+                { id: 'highest', label: 'Highest' },
+                { id: 'high', label: 'High' },
+                { id: 'medium', label: 'Med' },
+                { id: 'low', label: 'Low' },
+                { id: 'lowest', label: 'Lowest' },
+                { id: 'none', label: 'Normal' }
             ].forEach((pr) => {
-                const pb = el(prioRow, 'button', 'qc-cal-preset-btn', pr.label, { type: 'button' });
+                const pb = el(prioRow, 'button', 'qc-cal-preset-btn', undefined, { type: 'button' });
+                pb.innerHTML = priorityButtonHtml(pr.id, pr.label);
                 if (taskPriority === pr.id && pr.id !== 'none') pb.style.borderColor = '#8b5cf6';
                 pb.onclick = () => {
                     taskPriority = pr.id;
+                    originalPriorityEmoji = '';
                     renderPills();
                     updateTargetSubtitle();
                     renderCalPopover();
@@ -2449,7 +2744,16 @@ html, body {
             taskDueDate,
             taskStartDate,
             taskPriority,
-            targetDailyDate
+            targetDailyDate,
+            edit: editMode ? {
+                path: editMode.path,
+                line: editMode.line,
+                originalLine: editMode.originalLine,
+                priorityEmoji: originalPriorityEmoji,
+                scheduled: editMode.scheduled || '',
+                created: editMode.created || '',
+                preserved: editMode.preserved || []
+            } : undefined
         });
         textAreaEl.value = '';
         isSubmitting = false;
@@ -2457,8 +2761,10 @@ html, body {
 
     // Build UI
     const topBar = el(root, 'div', 'qc-top-bar');
-    el(topBar, 'div', 'qc-top-title', '⚡ QUICK CAPTURE');
-    const topClose = el(topBar, 'button', 'qc-top-close', '×', { type: 'button', title: 'Close (Esc)' });
+    const topTitle = el(topBar, 'div', 'qc-top-title');
+    topTitle.innerHTML = UI_ICONS.zap + '<span>QUICK CAPTURE</span>';
+    const topClose = el(topBar, 'button', 'qc-top-close', undefined, { type: 'button', title: 'Close (Esc)' });
+    topClose.innerHTML = UI_ICONS.x;
     topClose.onclick = () => closePopup();
 
     const textWrap = el(root, 'div', 'qc-textarea-wrapper');
@@ -2485,7 +2791,7 @@ html, body {
     dailyCalBtnEl.onclick = (e) => { e.stopPropagation(); closeDestMenu(); toggleCalPopover('dailyTarget'); };
 
     const attachBtn = el(bottomRight, 'button', 'qc-icon-btn', undefined, { type: 'button', title: 'Attach File / Screenshot' });
-    attachBtn.innerHTML = SVGS['paperclip'];
+    attachBtn.innerHTML = UI_ICONS.paperclip;
     fileInputEl = el(bottomRight, 'input', undefined, undefined, { type: 'file', multiple: 'true', style: 'display:none;' });
     attachBtn.onclick = () => fileInputEl.click();
     fileInputEl.onchange = async () => {
@@ -2496,7 +2802,8 @@ html, body {
         }
     };
 
-    const submitBtn = el(bottomRight, 'button', 'qc-btn-submit', 'Capture ↵', { type: 'button' });
+    const submitBtn = el(bottomRight, 'button', 'qc-btn-submit', undefined, { type: 'button' });
+    submitBtn.innerHTML = '<span>Capture</span>' + UI_ICONS.cornerDownLeft;
     submitBtn.onclick = () => submitCapture();
 
     const strip = el(root, 'div', 'qc-shortcut-strip');
@@ -2570,8 +2877,7 @@ html, body {
         if (files && files.length > 0) await handleFiles(files);
     });
 
-    setDestination(destination, false);
-    focusInput();
+    window.__qcReset(state);
 })();
 </script>
 </body>
@@ -2844,11 +3150,13 @@ export class QuickCaptureViewController {
 
         if (this.isStandaloneWindow) {
             const topBar = this.el(this.rootEl, 'div', 'qc-top-bar');
-            this.el(topBar, 'div', 'qc-top-title', '⚡ QUICK CAPTURE');
-            const topClose = this.el(topBar, 'button', 'qc-top-close', '×', {
+            const topTitle = this.el(topBar, 'div', 'qc-top-title');
+        topTitle.innerHTML = obsidianIconHtml('zap') + '<span>QUICK CAPTURE</span>';
+            const topClose = this.el(topBar, 'button', 'qc-top-close', undefined, {
                 type: 'button',
                 title: 'Close (Esc)'
             });
+            topClose.innerHTML = obsidianIconHtml('x');
             topClose.addEventListener('click', () => this.onCloseCallback());
         }
 
@@ -2899,7 +3207,7 @@ export class QuickCaptureViewController {
             type: 'button',
             title: 'Attach Image or File (or Paste with Ctrl+V / Drag & Drop)'
         });
-        attachBtn.innerHTML = LUCIDE_SVGS['paperclip'];
+        attachBtn.innerHTML = obsidianIconHtml('paperclip');
 
         this.fileInputEl = this.el(bottomRight, 'input', undefined, undefined, {
             type: 'file',
@@ -2915,9 +3223,10 @@ export class QuickCaptureViewController {
             }
         });
 
-        const submitBtn = this.el(bottomRight, 'button', 'qc-btn-submit', 'Capture ↵', {
+        const submitBtn = this.el(bottomRight, 'button', 'qc-btn-submit', undefined, {
             type: 'button'
         });
+        submitBtn.innerHTML = '<span>Capture</span>' + obsidianIconHtml('corner-down-left');
         submitBtn.addEventListener('click', () => this.submitCapture());
 
         const shortcutStrip = this.el(this.rootEl, 'div', 'qc-shortcut-strip');
@@ -3141,13 +3450,21 @@ export class QuickCaptureViewController {
         this.dailyTargetDateBtnEl.classList.toggle('has-value', hasCustomDaily);
     }
 
+    private priorityIconHtml(priority: TaskPriority): string {
+        const meta = TASK_PRIORITY_META[priority] ?? TASK_PRIORITY_META.none;
+        const svg = LUCIDE_SVGS[meta.icon] ?? '';
+        return svg.replace('<svg ', `<svg style="color:${meta.color}" `);
+    }
+
     private renderPills() {
         this.pillsRowEl.innerHTML = '';
 
         if (this.destination === 'task') {
             if (this.taskDueDate) {
-                const pill = this.el(this.pillsRowEl, 'div', 'qc-pill', `📅 Due: ${this.formatFriendlyDate(this.taskDueDate)}`);
-                const clear = this.el(pill, 'span', 'qc-pill-clear', '×');
+                const pill = this.el(this.pillsRowEl, 'div', 'qc-pill');
+                pill.innerHTML = obsidianIconHtml('calendar') + '<span>Due: ' + this.formatFriendlyDate(this.taskDueDate) + '</span>';
+                const clear = this.el(pill, 'span', 'qc-pill-clear');
+                clear.innerHTML = obsidianIconHtml('x');
                 clear.addEventListener('click', (e) => {
                     e.stopPropagation();
                     this.taskDueDate = '';
@@ -3161,8 +3478,10 @@ export class QuickCaptureViewController {
             }
 
             if (this.taskStartDate) {
-                const pill = this.el(this.pillsRowEl, 'div', 'qc-pill', `🛫 Start: ${this.formatFriendlyDate(this.taskStartDate)}`);
-                const clear = this.el(pill, 'span', 'qc-pill-clear', '×');
+                const pill = this.el(this.pillsRowEl, 'div', 'qc-pill');
+                pill.innerHTML = obsidianIconHtml('plane-takeoff') + '<span>Start: ' + this.formatFriendlyDate(this.taskStartDate) + '</span>';
+                const clear = this.el(pill, 'span', 'qc-pill-clear');
+                clear.innerHTML = obsidianIconHtml('x');
                 clear.addEventListener('click', (e) => {
                     e.stopPropagation();
                     this.taskStartDate = '';
@@ -3176,14 +3495,11 @@ export class QuickCaptureViewController {
             }
 
             if (this.taskPriority !== 'none') {
-                const emojiMap: Record<TaskPriority, string> = {
-                    none: '',
-                    high: '⏫ High Priority',
-                    medium: '🔼 Medium Priority',
-                    low: '🔽 Low Priority'
-                };
-                const pill = this.el(this.pillsRowEl, 'div', 'qc-pill', emojiMap[this.taskPriority]);
-                const clear = this.el(pill, 'span', 'qc-pill-clear', '×');
+                const pill = this.el(this.pillsRowEl, 'div', 'qc-pill');
+                pill.innerHTML = this.priorityIconHtml(this.taskPriority) +
+                    '<span>' + TASK_PRIORITY_META[this.taskPriority].label + ' Priority</span>';
+                const clear = this.el(pill, 'span', 'qc-pill-clear');
+                clear.innerHTML = obsidianIconHtml('x');
                 clear.addEventListener('click', (e) => {
                     e.stopPropagation();
                     this.taskPriority = 'none';
@@ -3194,8 +3510,10 @@ export class QuickCaptureViewController {
         } else if (['daily', 'journal', 'gratitude', 'win'].includes(this.destination)) {
             const todayStr = moment().format('YYYY-MM-DD');
             if (this.targetDailyDate !== todayStr) {
-                const pill = this.el(this.pillsRowEl, 'div', 'qc-pill', `📆 Target Day: ${this.formatFriendlyDate(this.targetDailyDate)}`);
-                const clear = this.el(pill, 'span', 'qc-pill-clear', '×');
+                const pill = this.el(this.pillsRowEl, 'div', 'qc-pill');
+                pill.innerHTML = obsidianIconHtml('calendar-days') + '<span>Target Day: ' + this.formatFriendlyDate(this.targetDailyDate) + '</span>';
+                const clear = this.el(pill, 'span', 'qc-pill-clear');
+                clear.innerHTML = obsidianIconHtml('x');
                 clear.addEventListener('click', (e) => {
                     e.stopPropagation();
                     this.targetDailyDate = todayStr;
@@ -3274,16 +3592,18 @@ export class QuickCaptureViewController {
                 typeTabs,
                 'button',
                 `qc-cal-type-tab ${this.activeCalendarField === 'due' ? 'is-active' : ''}`,
-                '📅 Due Date',
+                undefined,
                 { type: 'button' }
             );
+            dueTab.innerHTML = obsidianIconHtml('calendar') + '<span>Due Date</span>';
             const startTab = this.el(
                 typeTabs,
                 'button',
                 `qc-cal-type-tab ${this.activeCalendarField === 'start' ? 'is-active' : ''}`,
-                '🛫 Start Date',
+                undefined,
                 { type: 'button' }
             );
+            startTab.innerHTML = obsidianIconHtml('plane-takeoff') + '<span>Start Date</span>';
 
             dueTab.addEventListener('click', () => {
                 this.activeCalendarField = 'due';
@@ -3304,15 +3624,15 @@ export class QuickCaptureViewController {
         const nextMonday = moment().add(1, 'weeks').isoWeekday(1);
 
         const presets = [
-            { label: '★ Today', sub: today.format('ddd'), val: today.format('YYYY-MM-DD') },
-            { label: '☀ Tomorrow', sub: tomorrow.format('ddd'), val: tomorrow.format('YYYY-MM-DD') },
-            { label: '🛋 Weekend', sub: saturday.format('MMM D'), val: saturday.format('YYYY-MM-DD') },
-            { label: '⇥ Next Mon', sub: nextMonday.format('MMM D'), val: nextMonday.format('YYYY-MM-DD') }
+            { icon: 'sun', label: 'Today', sub: today.format('ddd'), val: today.format('YYYY-MM-DD') },
+            { icon: 'sunrise', label: 'Tomorrow', sub: tomorrow.format('ddd'), val: tomorrow.format('YYYY-MM-DD') },
+            { icon: 'sofa', label: 'Weekend', sub: saturday.format('MMM D'), val: saturday.format('YYYY-MM-DD') },
+            { icon: 'arrow-right-to-line', label: 'Next Mon', sub: nextMonday.format('MMM D'), val: nextMonday.format('YYYY-MM-DD') }
         ];
 
         presets.forEach((p) => {
             const btn = this.el(presetsGrid, 'button', 'qc-cal-preset-btn', undefined, { type: 'button' });
-            this.el(btn, 'span', undefined, p.label);
+            btn.innerHTML = obsidianIconHtml(p.icon) + '<span>' + p.label + '</span>';
             this.el(btn, 'span', 'qc-cal-preset-sub', p.sub);
             btn.addEventListener('click', () => this.setActiveCalendarDateValue(p.val));
         });
@@ -3321,12 +3641,15 @@ export class QuickCaptureViewController {
         this.el(calHeader, 'span', undefined, this.calendarViewMonth.format('MMMM YYYY'));
 
         const navGroup = this.el(calHeader, 'div', 'qc-cal-nav');
-        const prevBtn = this.el(navGroup, 'button', 'qc-cal-nav-btn', '◀', { type: 'button' });
-        const todayJumpBtn = this.el(navGroup, 'button', 'qc-cal-nav-btn', '●', {
+        const prevBtn = this.el(navGroup, 'button', 'qc-cal-nav-btn', undefined, { type: 'button' });
+        prevBtn.innerHTML = obsidianIconHtml('chevron-left');
+        const todayJumpBtn = this.el(navGroup, 'button', 'qc-cal-nav-btn', undefined, {
             type: 'button',
             title: 'Jump to Current Month'
         });
-        const nextBtn = this.el(navGroup, 'button', 'qc-cal-nav-btn', '▶', { type: 'button' });
+        todayJumpBtn.innerHTML = obsidianIconHtml('circle');
+        const nextBtn = this.el(navGroup, 'button', 'qc-cal-nav-btn', undefined, { type: 'button' });
+        nextBtn.innerHTML = obsidianIconHtml('chevron-right');
 
         prevBtn.addEventListener('click', () => {
             this.calendarViewMonth = this.calendarViewMonth.clone().subtract(1, 'months');
@@ -3372,13 +3695,16 @@ export class QuickCaptureViewController {
         if (this.destination === 'task') {
             const prioRow = this.el(popover, 'div', 'qc-cal-presets');
             const prios: { id: TaskPriority; label: string }[] = [
-                { id: 'high', label: '⏫ High' },
-                { id: 'medium', label: '🔼 Med' },
-                { id: 'low', label: '🔽 Low' },
-                { id: 'none', label: '○ Normal' }
+                { id: 'highest', label: 'Highest' },
+                { id: 'high', label: 'High' },
+                { id: 'medium', label: 'Med' },
+                { id: 'low', label: 'Low' },
+                { id: 'lowest', label: 'Lowest' },
+                { id: 'none', label: 'Normal' }
             ];
             prios.forEach((pr) => {
-                const pBtn = this.el(prioRow, 'button', 'qc-cal-preset-btn', pr.label, { type: 'button' });
+                const pBtn = this.el(prioRow, 'button', 'qc-cal-preset-btn', undefined, { type: 'button' });
+                pBtn.innerHTML = this.priorityIconHtml(pr.id) + '<span>' + pr.label + '</span>';
                 if (this.taskPriority === pr.id && pr.id !== 'none') {
                     pBtn.style.borderColor = '#8b5cf6';
                 }
@@ -3457,6 +3783,35 @@ export class QuickCaptureViewController {
     }
 }
 
+class TaskEditPickerModal extends Modal {
+    constructor(
+        app: App,
+        private candidates: TaskCandidate[],
+        private onPick: (candidate: TaskCandidate) => void
+    ) {
+        super(app);
+    }
+
+    onOpen() {
+        const { contentEl } = this;
+        contentEl.createEl('h2', { text: 'Which task should Quick Capture edit?' });
+        for (const candidate of this.candidates) {
+            const button = contentEl.createEl('button', {
+                cls: 'qc-pick-btn',
+                text: `${candidate.path} : ${candidate.line + 1} — ${candidate.description || candidate.originalLine}`
+            });
+            button.addEventListener('click', () => {
+                this.onPick(candidate);
+                this.close();
+            });
+        }
+    }
+
+    onClose() {
+        this.contentEl.empty();
+    }
+}
+
 class PurgeCompletedTasksModal extends Modal {
     constructor(app: App, private plugin: QuickCapturePlugin) {
         super(app);
@@ -3517,11 +3872,13 @@ export class QuickCaptureSettingTab extends PluginSettingTab {
 
         const detected = this.plugin.scanAndDetectVaultConfig(false);
         const infoBox = containerEl.createDiv({ cls: 'qc-detected-info' });
-        infoBox.createEl('strong', { text: '⚡ Live Detected Vault Settings:' });
+        const detectedTitle = infoBox.createEl('strong');
+        detectedTitle.innerHTML = obsidianIconHtml('zap') + '<span>Live Detected Vault Settings:</span>';
 
         const addDetectedLine = (label: string, value: string) => {
             const line = infoBox.createDiv({ cls: 'qc-detected-line' });
-            line.createEl('strong', { text: `• ${label}:` });
+            const labelEl = line.createEl('strong');
+            labelEl.innerHTML = obsidianIconHtml('circle') + '<span>' + label + ':</span>';
             line.createEl('code', { text: value });
         };
 
@@ -3540,7 +3897,8 @@ export class QuickCaptureSettingTab extends PluginSettingTab {
             ? `${detected.dailyFolder}/${dailyExample}.md`
             : `/${dailyExample}.md`;
         const dailyLine = infoBox.createDiv({ cls: 'qc-detected-daily' });
-        dailyLine.createEl('strong', { cls: 'qc-detected-daily-label', text: '• Daily Notes:' });
+        const dailyLabel = dailyLine.createEl('strong', { cls: 'qc-detected-daily-label' });
+        dailyLabel.innerHTML = obsidianIconHtml('circle') + '<span>Daily Notes:</span>';
         const dailyDetails = dailyLine.createDiv({ cls: 'qc-detected-daily-details' });
         const formatLine = dailyDetails.createDiv();
         formatLine.createEl('span', { text: 'Format: ' });

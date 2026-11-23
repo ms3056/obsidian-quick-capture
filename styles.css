@@ -358,17 +358,18 @@
 
 .qc-cal-presets {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 4px;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
 }
 
 .qc-cal-preset-btn {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 4px 7px;
+    justify-content: center;
+    gap: 5px;
+    padding: 4px 5px;
     border-radius: 6px;
-    font-size: 11px;
+    font-size: 10.5px;
     background: #27272f;
     color: #f4f4f6;
     border: 1px solid transparent;
@@ -552,4 +553,72 @@
 
 .qc-detected-daily-details code {
     overflow-wrap: anywhere;
+}
+
+
+/* Injected edit icon. Exact metrics of tasks-lucide-icons' action icons:
+   14px span, 1em SVG, 2.2px stroke, vertical-align: middle, no nudge/chip. */
+.qc-edit-btn {
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin-left: 0.33em;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  color: #3b82f6 !important;
+  line-height: 1;
+  vertical-align: middle;
+  transform: none !important;
+  cursor: pointer;
+}
+.qc-edit-btn svg.svg-icon {
+  width: 1em;
+  height: 1em;
+  margin-right: 0;
+  opacity: 1;
+  stroke-width: 2.2px;
+}
+.qc-edit-btn:hover {
+  background: transparent !important;
+  color: #3b82f6 !important;
+}
+.qc-pick-btn {
+  display: block;
+  width: 100%;
+  margin: 4px 0;
+  text-align: left;
+}
+
+/* Lucide icons in settings detection box */
+.qc-detected-info svg {
+    width: 13px;
+    height: 13px;
+    vertical-align: -2px;
+    margin-right: 4px;
+}
+
+/* Native Lucide SVGs in the embedded dialog UI */
+.qc-pill svg,
+.qc-top-close svg,
+.qc-btn-submit svg,
+.qc-cal-nav-btn svg {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2;
+    flex: 0 0 auto;
+}
+.qc-pill-clear svg { width: 12px; height: 12px; }
+.qc-top-title svg {
+    width: 15px;
+    height: 15px;
+    stroke-width: 2;
+    color: #c8ad55;
+    opacity: 0.85;
+    flex: 0 0 auto;
 }

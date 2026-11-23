@@ -30,11 +30,47 @@ __export(main_exports, {
   LUCIDE_SVGS: () => LUCIDE_SVGS,
   QuickCaptureSettingTab: () => QuickCaptureSettingTab,
   QuickCaptureViewController: () => QuickCaptureViewController,
-  default: () => QuickCapturePlugin
+  default: () => QuickCapturePlugin,
+  obsidianIconHtml: () => obsidianIconHtml
 });
 module.exports = __toCommonJS(main_exports);
 var import_obsidian = require("obsidian");
+
+// src/task-model.ts
 var TASK_LINE_REGEX = /^(\s*)[-*+]\s+\[([^\]]+)\]/;
+var TASK_PRIORITY_EMOJI = {
+  highest: "\u{1F53A}",
+  high: "\u23EB",
+  medium: "\u{1F53C}",
+  low: "\u{1F53D}",
+  lowest: "\u23EC",
+  none: ""
+};
+var TASK_PRIORITIES = ["highest", "high", "medium", "low", "lowest", "none"];
+var TASK_PRIORITY_META = {
+  highest: { label: "Highest", icon: "chevrons-up", color: "#ef4444" },
+  high: { label: "High", icon: "chevron-up", color: "#f97316" },
+  medium: { label: "Med", icon: "minus", color: "#eab308" },
+  low: { label: "Low", icon: "priority-chevron-down", color: "#3b82f6" },
+  lowest: { label: "Lowest", icon: "chevrons-down", color: "#94a3b8" },
+  none: { label: "Normal", icon: "circle", color: "#9ca3af" }
+};
+function priorityCodeFromTaskPriority(priority) {
+  switch (priority) {
+    case "highest":
+      return "0";
+    case "high":
+      return "1";
+    case "medium":
+      return "2";
+    case "low":
+      return "4";
+    case "lowest":
+      return "5";
+    default:
+      return "3";
+  }
+}
 function getTaskPriorityOrder(taskLine) {
   if (taskLine.includes("\u{1F53A}"))
     return 0;
@@ -112,7 +148,13 @@ function normalizeTaskLineOrder(line) {
   fields.sort((a, b) => a.order - b.order || a.index - b.index);
   const priorities = fields.filter((field) => field.order < 10);
   const metadata = fields.filter((field) => field.order >= 10);
-  return [prefix, ...priorities.map((field) => field.value), description, hasTaskTag ? "#task" : "", ...metadata.map((field) => field.value)].filter(Boolean).join(" ");
+  return [
+    prefix,
+    ...priorities.map((field) => field.value),
+    description,
+    hasTaskTag ? "#task" : "",
+    ...metadata.map((field) => field.value)
+  ].filter(Boolean).join(" ");
 }
 function getTaskSortDate(taskLine) {
   for (const emoji of ["\u{1F4C5}", "\u23F3", "\u{1F6EB}"]) {
@@ -211,6 +253,148 @@ function organizeTaskListContent(content, insertPosition, normalizeTaskOrder = f
   }
   return `${frontmatter}${organizedLines.join(lineEnding).replace(/(?:\r?\n)*$/, "")}${lineEnding}`;
 }
+var PROTECTED_SPANS = /\[\[[^\]]*\]\]|\[[^\]]*\]\([^)]*\)|`[^`]*`/g;
+function findDetailIndex(text) {
+  var _a;
+  const masked = text.replace(PROTECTED_SPANS, (m) => " ".repeat(m.length));
+  const match = masked.match(/(^|\s)\|(?!\|)/);
+  return match ? ((_a = match.index) != null ? _a : 0) + match[0].length - 1 : -1;
+}
+function extractDetailText(rawSuffix) {
+  return rawSuffix.startsWith(" ") ? rawSuffix.slice(1) : rawSuffix;
+}
+var FIELD_RE = /(🔺|⏫|🔼|🔽|⏬|🛫|⏳|➕|📅|✅|❌)(?:\s+(\d{4}-\d{2}-\d{2}))?/gu;
+function parseEditableTask(line) {
+  var _a, _b;
+  const m = line.match(TASK_LINE_REGEX);
+  if (!m)
+    return null;
+  const body = line.slice(m[0].length).trim();
+  const out = {
+    prefix: line.slice(0, m[0].length),
+    text: "",
+    priorityEmoji: "",
+    priority: "none",
+    start: "",
+    scheduled: "",
+    created: "",
+    due: "",
+    preserved: []
+  };
+  const kept = [];
+  let last = 0;
+  FIELD_RE.lastIndex = 0;
+  let hit;
+  while ((hit = FIELD_RE.exec(body)) !== null) {
+    kept.push(body.slice(last, hit.index));
+    const emoji = hit[1];
+    const date = (_a = hit[2]) != null ? _a : "";
+    if (["\u{1F53A}", "\u23EB", "\u{1F53C}", "\u{1F53D}", "\u23EC"].includes(emoji)) {
+      out.priorityEmoji = emoji;
+      out.priority = (_b = Object.keys(TASK_PRIORITY_EMOJI).find((key) => TASK_PRIORITY_EMOJI[key] === emoji)) != null ? _b : "none";
+    } else if (emoji === "\u{1F6EB}")
+      out.start = date;
+    else if (emoji === "\u23F3")
+      out.scheduled = date;
+    else if (emoji === "\u2795")
+      out.created = date;
+    else if (emoji === "\u{1F4C5}")
+      out.due = date;
+    else
+      out.preserved.push(date ? `${emoji} ${date}` : emoji);
+    last = hit.index + hit[0].length;
+  }
+  kept.push(body.slice(last));
+  out.text = kept.join(" ").replace(/\s+/g, " ").trim();
+  return out;
+}
+function buildEditedTaskLine(original, edit) {
+  const parsed = parseEditableTask(original);
+  if (!parsed)
+    throw new Error("Not a task line");
+  const parts = [parsed.prefix];
+  const reuseOriginal = edit.priority === parsed.priority && !!edit.priorityEmoji;
+  const emoji = reuseOriginal ? edit.priorityEmoji : TASK_PRIORITY_EMOJI[edit.priority];
+  if (emoji)
+    parts.push(emoji);
+  parts.push(edit.text.trim());
+  parts.push(...edit.preserved);
+  if (edit.start)
+    parts.push(`\u{1F6EB} ${edit.start}`);
+  if (edit.scheduled)
+    parts.push(`\u23F3 ${edit.scheduled}`);
+  if (edit.created)
+    parts.push(`\u2795 ${edit.created}`);
+  if (edit.due)
+    parts.push(`\u{1F4C5} ${edit.due}`);
+  const joined = parts.filter(Boolean).join(" ");
+  return edit.normalize ? normalizeTaskLineOrder(joined) : repositionTaskKeywordTag(joined);
+}
+function dueBucketFromIso(iso, todayIso) {
+  const a = Date.parse(`${iso}T00:00:00Z`);
+  const b = Date.parse(`${todayIso}T00:00:00Z`);
+  if (!Number.isFinite(a) || !Number.isFinite(b))
+    return "";
+  const days = Math.round((b - a) / 864e5);
+  if (days === 0)
+    return "today";
+  const magnitude = Math.abs(days) <= 7 ? `${Math.abs(days)}d` : "far";
+  return days > 0 ? `past-${magnitude}` : `future-${magnitude}`;
+}
+function priorityNameFromCode(code) {
+  switch (code) {
+    case "0":
+      return "highest";
+    case "1":
+      return "high";
+    case "2":
+      return "medium";
+    case "4":
+      return "low";
+    case "5":
+      return "lowest";
+    default:
+      return "normal";
+  }
+}
+function normalizeForMatch(value) {
+  return (value || "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+function rankTaskCandidates(signals, candidates) {
+  const description = normalizeForMatch(signals.description);
+  const scored = candidates.map((candidate) => {
+    const candidateDescription = normalizeForMatch(candidate.description);
+    let score = 0;
+    let descriptionScore = 0;
+    if (description && candidateDescription === description) {
+      score += 10;
+      descriptionScore = 10;
+    } else if (description && (candidateDescription.includes(description) || description.includes(candidateDescription))) {
+      score += 5;
+      descriptionScore = 5;
+    }
+    if (candidate.status === signals.status)
+      score += 3;
+    else if (signals.status && candidate.status)
+      score -= 4;
+    if (candidate.priority && candidate.priority === signals.priority)
+      score += 2;
+    else if (signals.priority && candidate.priority)
+      score -= 2;
+    if (signals.dueBucket && candidate.dueBucket === signals.dueBucket)
+      score += 3;
+    else if (signals.dueBucket && candidate.dueBucket)
+      score -= 2;
+    if (candidate.path.endsWith("Master Task List.md"))
+      score += 2;
+    if (signals.sourcePath && candidate.path === signals.sourcePath)
+      score += 1;
+    return { candidate, score, descriptionScore };
+  });
+  return scored.filter((entry) => entry.descriptionScore > 0 && entry.score >= 8).sort((a, b) => b.score - a.score).map((entry) => entry.candidate);
+}
+
+// src/main.ts
 function purgeCompletedTasksContent(content, olderThan) {
   const lineEnding = content.includes("\r\n") ? "\r\n" : "\n";
   let removed = 0;
@@ -376,6 +560,27 @@ var EMBEDDED_STANDALONE_CSS = `/* ==============================================
     margin-left: 3px;
     opacity: 0.75;
     font-weight: 700;
+}
+.qc-pill svg,
+.qc-top-close svg,
+.qc-btn-submit svg,
+.qc-cal-nav-btn svg {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2;
+    flex: 0 0 auto;
+}
+.qc-pill-clear svg {
+    width: 12px;
+    height: 12px;
+}
+.qc-top-title svg {
+    width: 15px;
+    height: 15px;
+    stroke-width: 2;
+    color: #c8ad55;
+    opacity: 0.85;
+    flex: 0 0 auto;
 }
 
 .qc-pill .qc-pill-clear:hover {
@@ -582,6 +787,10 @@ var EMBEDDED_STANDALONE_CSS = `/* ==============================================
 }
 
 .qc-cal-type-tab {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
     border: none;
     background: transparent;
     color: #9ca3af;
@@ -591,6 +800,13 @@ var EMBEDDED_STANDALONE_CSS = `/* ==============================================
     border-radius: 5px;
     cursor: pointer;
 }
+.qc-cal-type-tab svg,
+.qc-cal-preset-btn svg {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2;
+    flex: 0 0 auto;
+}
 
 .qc-cal-type-tab.is-active {
     background: #8b5cf6;
@@ -599,17 +815,18 @@ var EMBEDDED_STANDALONE_CSS = `/* ==============================================
 
 .qc-cal-presets {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 4px;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
 }
 
 .qc-cal-preset-btn {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    padding: 4px 7px;
+    justify-content: center;
+    gap: 5px;
+    padding: 4px 5px;
     border-radius: 6px;
-    font-size: 11px;
+    font-size: 10.5px;
     background: #27272f;
     color: #f4f4f6;
     border: 1px solid transparent;
@@ -624,6 +841,19 @@ var EMBEDDED_STANDALONE_CSS = `/* ==============================================
 .qc-cal-preset-sub {
     font-size: 10px;
     color: #9ca3af;
+}
+
+.qc-cal-quick-chip {
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    white-space: nowrap;
+    line-height: 1.15;
+    padding: 3px 2px;
+}
+.qc-cal-quick-chip .qc-cal-preset-sub {
+    font-size: 9.5px;
+    line-height: 1.1;
 }
 
 .qc-cal-header {
@@ -702,25 +932,33 @@ var EMBEDDED_STANDALONE_CSS = `/* ==============================================
 }
 
 .qc-cal-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
     gap: 6px;
+    align-items: center;
     padding-top: 5px;
     border-top: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .qc-cal-native-input {
+    grid-column: 1 / span 2;
+    min-width: 0;
+    width: 100%;
     font-size: 11px;
     padding: 2px 6px;
     border-radius: 5px;
     border: 1px solid rgba(255, 255, 255, 0.14);
     background: #27272f;
     color: #f4f4f6;
-    flex: 1;
+}
+.qc-cal-native-input::-webkit-calendar-picker-indicator {
+    display: none !important;
+    -webkit-appearance: none !important;
+    appearance: none !important;
 }
 
 .qc-cal-clear-btn {
+    grid-column: 3;
     font-size: 11px;
     padding: 3px 8px;
     border-radius: 5px;
@@ -767,7 +1005,17 @@ var EMBEDDED_STANDALONE_CSS = `/* ==============================================
     line-height: 1.5;
 }
 `;
+function obsidianIconHtml(name) {
+  const icon = (0, import_obsidian.getIcon)(name);
+  return icon ? icon.outerHTML : "";
+}
 var LUCIDE_SVGS = {
+  "chevrons-up": `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="m17 11-5-5-5 5"/><path d="m17 18-5-5-5 5"/></svg>`,
+  "chevron-up": `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6"/></svg>`,
+  "minus": `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg>`,
+  "priority-chevron-down": `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>`,
+  "chevrons-down": `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><path d="m17 6-5 5-5-5"/><path d="m17 13-5 5-5-5"/></svg>`,
+  "circle": `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/></svg>`,
   "calendar-with-checkmark": `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="4" rx="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/><path d="m9 16 2 2 4-4"/></svg>`,
   "book-open": `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>`,
   "heart": `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></svg>`,
@@ -879,6 +1127,9 @@ var QuickCapturePlugin = class extends import_obsidian.Plugin {
     this.isUnloading = false;
     this.organizeTasksCommandRegistered = false;
     this.currentStandaloneDest = "inbox";
+    this.pendingEdit = null;
+    this.globalTaskObserver = null;
+    this.observedTaskRows = /* @__PURE__ */ new WeakSet();
     this.detectedInfo = {};
   }
   async onload() {
@@ -917,6 +1168,18 @@ var QuickCapturePlugin = class extends import_obsidian.Plugin {
         void this.moveTaskAtCursorToMasterList(editor, (_a = ctx.file) != null ? _a : null);
       }
     });
+    this.addCommand({
+      id: "quick-capture-edit-task",
+      name: "Quick Capture: Edit Task at Cursor",
+      editorCheckCallback: (checking, editor, ctx) => {
+        var _a;
+        if (checking) {
+          return ctx instanceof import_obsidian.MarkdownView && !!ctx.file && TASK_LINE_REGEX.test(editor.getLine(editor.getCursor().line));
+        }
+        void this.openTaskEditor(editor, (_a = ctx.file) != null ? _a : null);
+        return true;
+      }
+    });
     Object.keys(DESTINATION_META).forEach((dest) => {
       this.addCommand({
         id: `open-quick-capture-${dest}`,
@@ -926,6 +1189,22 @@ var QuickCapturePlugin = class extends import_obsidian.Plugin {
         }
       });
     });
+    this.registerMarkdownPostProcessor((el, ctx) => {
+      const isTasksBlock = el.classList.contains("block-language-tasks") || !!el.querySelector(".block-language-tasks") || !!el.querySelector("code.language-tasks");
+      if (!isTasksBlock)
+        return;
+      const wrap = () => {
+        this.wrapTaskDetails(el);
+        this.injectEditButtons(el, ctx.sourcePath);
+      };
+      wrap();
+      const observer = new MutationObserver(wrap);
+      observer.observe(el, { childList: true, subtree: true, characterData: true });
+      const child = new import_obsidian.MarkdownRenderChild(el);
+      child.register(() => observer.disconnect());
+      ctx.addChild(child);
+    }, 100);
+    this.startGlobalTaskObserver();
     this.updateOrganizeTasksCommand();
     this.addSettingTab(new QuickCaptureSettingTab(this.app, this));
   }
@@ -934,6 +1213,9 @@ var QuickCapturePlugin = class extends import_obsidian.Plugin {
     this.cleanupRuntimeResources();
   }
   cleanupRuntimeResources() {
+    var _a;
+    (_a = this.globalTaskObserver) == null ? void 0 : _a.disconnect();
+    this.globalTaskObserver = null;
     this.unregisterGlobalShortcut();
     this.destroyStandaloneWindow();
     this.stopLoopbackServer();
@@ -978,6 +1260,266 @@ var QuickCapturePlugin = class extends import_obsidian.Plugin {
       new import_obsidian.Notice(`Could not organize tasks in ${targetPath}. Check the console for details.`);
     }
   }
+  /**
+   * Wrap the "| detail" suffix in a classed span so CSS can style it.
+   * Tasks renders descriptions asynchronously, so a per-block observer
+   * re-runs this after each query refresh; the marker makes it idempotent.
+   */
+  wrapTaskDetails(root) {
+    var _a, _b, _c, _d, _e;
+    const containers = Array.from(
+      root.querySelectorAll(".plugin-tasks-list-item .task-description")
+    );
+    if (containers.length === 0) {
+      containers.push(...Array.from(root.querySelectorAll(".task-list-item .task-description")));
+    }
+    for (const container of containers) {
+      if (container.hasAttribute("data-qc-detail-wrapped"))
+        continue;
+      const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+      let hitNode = null;
+      let hitIndex = -1;
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const index = findDetailIndex((_a = node.textContent) != null ? _a : "");
+        if (index >= 0) {
+          hitNode = node;
+          hitIndex = index;
+          break;
+        }
+      }
+      if (!hitNode) {
+        const tags = Array.from(container.querySelectorAll(".tag"));
+        const rowOwner = container.closest(".plugin-tasks-list-item");
+        if (tags.length === 0 || !rowOwner || rowOwner.querySelector(".qc-detail-row"))
+          continue;
+        const tagRow = document.createElement("span");
+        tagRow.className = "qc-detail-row";
+        for (const tag of tags)
+          tagRow.appendChild(tag);
+        rowOwner.appendChild(tagRow);
+        container.setAttribute("data-qc-detail-wrapped", "1");
+        continue;
+      }
+      const row = document.createElement("span");
+      row.className = "qc-detail-row";
+      const detail = document.createElement("span");
+      detail.className = "qc-task-detail";
+      detail.textContent = extractDetailText(((_b = hitNode.textContent) != null ? _b : "").slice(hitIndex + 1));
+      row.appendChild(detail);
+      const li = container.closest(".plugin-tasks-list-item");
+      if (!li)
+        continue;
+      li.appendChild(row);
+      const before = document.createTextNode(((_c = hitNode.textContent) != null ? _c : "").slice(0, hitIndex));
+      (_d = hitNode.parentNode) == null ? void 0 : _d.insertBefore(before, hitNode);
+      let sibling = hitNode.nextSibling;
+      while (sibling) {
+        const next = sibling.nextSibling;
+        const isTag = sibling instanceof HTMLElement && sibling.classList.contains("tag");
+        if (isTag)
+          row.appendChild(sibling);
+        else
+          detail.appendChild(sibling);
+        sibling = next;
+      }
+      (_e = hitNode.parentNode) == null ? void 0 : _e.removeChild(hitNode);
+      for (const tag of Array.from(container.querySelectorAll(".tag"))) {
+        if (!tag.closest(".qc-detail-row"))
+          row.appendChild(tag);
+      }
+      container.setAttribute("data-qc-detail-wrapped", "1");
+    }
+  }
+  async openTaskEditor(editor, file) {
+    if (!file || file.extension !== "md") {
+      new import_obsidian.Notice("Open a Markdown note to edit a task.");
+      return;
+    }
+    const line = editor.getCursor().line;
+    const originalLine = editor.getLine(line);
+    if (!TASK_LINE_REGEX.test(originalLine) || !parseEditableTask(originalLine)) {
+      new import_obsidian.Notice('Put the cursor on a task line (for example "- [ ] ...").');
+      return;
+    }
+    await this.openTaskEditorAt(file, line, originalLine);
+  }
+  async openTaskEditorAt(file, line, originalLine) {
+    const parsed = parseEditableTask(originalLine);
+    if (!parsed) {
+      new import_obsidian.Notice("That task could not be parsed for editing.");
+      return;
+    }
+    this.pendingEdit = { ...parsed, path: file.path, line, originalLine };
+    await this.triggerGlobalQuickCapture("task", this.pendingEdit);
+  }
+  /**
+   * Safety net: if the post-processor hook misses a Tasks block, catch newly
+   * rendered rows from a single plugin-level observer. One observer only;
+   * WeakSet prevents repeat work and it is disconnected on plugin unload.
+   */
+  startGlobalTaskObserver() {
+    if (typeof document === "undefined" || !document.body)
+      return;
+    let timer = null;
+    const process = () => {
+      var _a, _b, _c;
+      const path = (_b = (_a = this.app.workspace.getActiveFile()) == null ? void 0 : _a.path) != null ? _b : "";
+      if (!this.isTasklistNote(path))
+        return;
+      for (const li of Array.from(document.querySelectorAll(".plugin-tasks-list-item"))) {
+        if (this.observedTaskRows.has(li))
+          continue;
+        this.observedTaskRows.add(li);
+        const block = (_c = li.closest(".block-language-tasks")) != null ? _c : li;
+        this.wrapTaskDetails(block);
+        this.injectEditButtons(block, path);
+      }
+    };
+    const schedule = () => {
+      if (timer)
+        clearTimeout(timer);
+      timer = setTimeout(process, 50);
+    };
+    this.globalTaskObserver = new MutationObserver(schedule);
+    this.globalTaskObserver.observe(document.body, { childList: true, subtree: true });
+    schedule();
+  }
+  isTasklistNote(path) {
+    var _a, _b;
+    const file = this.app.vault.getAbstractFileByPath((0, import_obsidian.normalizePath)(path || ""));
+    if (!(file instanceof import_obsidian.TFile))
+      return false;
+    const classes = (_b = (_a = this.app.metadataCache.getFileCache(file)) == null ? void 0 : _a.frontmatter) == null ? void 0 : _b.cssclasses;
+    if (Array.isArray(classes)) {
+      return classes.some((c) => String(c).trim().toLowerCase() === "tasklist");
+    }
+    return typeof classes === "string" && classes.split(/[\s,]+/).some((c) => c.toLowerCase() === "tasklist");
+  }
+  /** Inject our own edit button into rendered Tasks queries in tasklist notes. */
+  injectEditButtons(root, sourcePath) {
+    var _a;
+    if (!this.isTasklistNote(sourcePath))
+      return;
+    const rows = Array.from(root.querySelectorAll(".plugin-tasks-list-item"));
+    if ((_a = root.matches) == null ? void 0 : _a.call(root, ".plugin-tasks-list-item"))
+      rows.unshift(root);
+    for (const li of rows) {
+      if (li.querySelector(".qc-edit-btn") || li.querySelector(".tasks-edit"))
+        continue;
+      const button = document.createElement("span");
+      button.className = "qc-edit-btn";
+      button.setAttribute("role", "button");
+      button.tabIndex = 0;
+      button.title = "Edit in Quick Capture";
+      (0, import_obsidian.setIcon)(button, "zap");
+      const activate = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void this.openTaskEditorFromRenderedItem(li, sourcePath);
+      };
+      button.addEventListener("click", activate);
+      button.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          activate(event);
+        }
+      });
+      let slot = li.querySelector(":scope > .qc-action-slot");
+      if (!slot) {
+        slot = document.createElement("span");
+        slot.className = "qc-action-slot";
+        li.appendChild(slot);
+      }
+      slot.appendChild(button);
+    }
+  }
+  readRenderedSignals(li, sourcePath) {
+    var _a, _b, _c, _d, _e, _f;
+    return {
+      description: (_c = (_b = (_a = li.querySelector(".task-description")) == null ? void 0 : _a.textContent) == null ? void 0 : _b.trim()) != null ? _c : "",
+      status: ((_d = li.getAttribute("data-task")) != null ? _d : " ").trim() || " ",
+      priority: (_e = li.getAttribute("data-task-priority")) != null ? _e : "",
+      dueBucket: (_f = li.getAttribute("data-task-due")) != null ? _f : "",
+      sourcePath
+    };
+  }
+  /** Read Tasks' own cache, with a vault-scan fallback. Never modifies Tasks. */
+  async getTaskCandidates(sourcePath) {
+    var _a, _b, _c, _d, _e, _f, _g;
+    const today = (0, import_obsidian.moment)().format("YYYY-MM-DD");
+    const tasksApi = (_b = (_a = this.app.plugins) == null ? void 0 : _a.plugins) == null ? void 0 : _b["obsidian-tasks-plugin"];
+    const tasks = typeof (tasksApi == null ? void 0 : tasksApi.getTasks) === "function" ? tasksApi.getTasks() : [];
+    const candidates = [];
+    for (const task of tasks) {
+      const path = task.path || ((_c = task.taskLocation) == null ? void 0 : _c.path);
+      const line = (_d = task.taskLocation) == null ? void 0 : _d.lineNumber;
+      const originalLine = task.originalMarkdown;
+      if (!path || typeof line !== "number" || !originalLine)
+        continue;
+      candidates.push({
+        path,
+        line,
+        originalLine,
+        description: task.description || "",
+        status: ((_f = (_e = task.status) == null ? void 0 : _e.symbol) != null ? _f : " ").trim() || " ",
+        priority: priorityNameFromCode(String((_g = task.priority) != null ? _g : "3")),
+        dueBucket: task.due && typeof task.due.format === "function" ? dueBucketFromIso(task.due.format("YYYY-MM-DD"), today) : ""
+      });
+    }
+    if (candidates.length > 0)
+      return candidates;
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      let content;
+      try {
+        content = await this.app.vault.cachedRead(file);
+      } catch (e) {
+        continue;
+      }
+      content.split(/\r?\n/).forEach((lineText, index) => {
+        var _a2;
+        const match = lineText.match(TASK_LINE_REGEX);
+        if (!match)
+          return;
+        const parsed = parseEditableTask(lineText);
+        if (!parsed)
+          return;
+        const code = priorityCodeFromTaskPriority(parsed.priority);
+        candidates.push({
+          path: file.path,
+          line: index,
+          originalLine: lineText,
+          description: parsed.text,
+          status: ((_a2 = match[2]) != null ? _a2 : " ").trim() || " ",
+          priority: priorityNameFromCode(code),
+          dueBucket: parsed.due ? dueBucketFromIso(parsed.due, today) : ""
+        });
+      });
+    }
+    return candidates;
+  }
+  async openAtCandidate(candidate) {
+    const file = this.app.vault.getAbstractFileByPath((0, import_obsidian.normalizePath)(candidate.path));
+    if (!(file instanceof import_obsidian.TFile)) {
+      new import_obsidian.Notice(`Source note not found: ${candidate.path}`);
+      return;
+    }
+    await this.openTaskEditorAt(file, candidate.line, candidate.originalLine);
+  }
+  async openTaskEditorFromRenderedItem(li, sourcePath) {
+    const signals = this.readRenderedSignals(li, sourcePath);
+    const ranked = rankTaskCandidates(signals, await this.getTaskCandidates(sourcePath));
+    if (ranked.length === 0) {
+      new import_obsidian.Notice("Could not find the source task for editing.");
+      return;
+    }
+    if (ranked.length === 1) {
+      await this.openAtCandidate(ranked[0]);
+      return;
+    }
+    new TaskEditPickerModal(this.app, ranked, (candidate) => {
+      void this.openAtCandidate(candidate);
+    }).open();
+  }
   async moveTaskAtCursorToMasterList(editor, activeFile) {
     const lineNumber = editor.getCursor().line;
     const rawLine = editor.getLine(lineNumber);
@@ -1006,7 +1548,7 @@ var QuickCapturePlugin = class extends import_obsidian.Plugin {
     if (normalizedAutoTag && !cleanedTask.includes(normalizedAutoTag)) {
       parts.push(normalizedAutoTag);
     }
-    if (this.settings.includeCreatedDateInTask && !/\u2795\s*\d{4}-\d{2}-\d{2}/u.test(cleanedTask)) {
+    if (this.settings.includeCreatedDateInTask && !/➕\s*\d{4}-\d{2}-\d{2}/u.test(cleanedTask)) {
       parts.push(`\u2795 ${(0, import_obsidian.moment)().format("YYYY-MM-DD")}`);
     }
     const rawTaskLine = parts.join(" ");
@@ -1216,6 +1758,7 @@ var QuickCapturePlugin = class extends import_obsidian.Plugin {
           }
           try {
             if (route === "/api/close") {
+              this.pendingEdit = null;
               this.hideStandaloneWindowOnly();
               sendJson(200, { ok: true });
               return;
@@ -1262,9 +1805,11 @@ var QuickCapturePlugin = class extends import_obsidian.Plugin {
               return;
             }
             if (route === "/api/capture") {
-              const validPriority = data.taskPriority === void 0 || ["none", "high", "medium", "low"].includes(data.taskPriority);
+              const validPriority = data.taskPriority === void 0 || TASK_PRIORITIES.includes(data.taskPriority);
               const validDates = isOptionalIsoDate(data.taskDueDate) && isOptionalIsoDate(data.taskScheduledDate) && isOptionalIsoDate(data.taskStartDate) && isOptionalIsoDate(data.targetDailyDate);
-              if (!isCaptureDestination(data.destination) || typeof data.rawText !== "string" || data.rawText.length > MAX_CAPTURE_TEXT_LENGTH || !validPriority || !validDates) {
+              const e = data.edit;
+              const validEdit = e === void 0 || e && typeof e === "object" && typeof e.path === "string" && Number.isInteger(e.line) && e.line >= 0 && typeof e.originalLine === "string" && (e.priorityEmoji === void 0 || typeof e.priorityEmoji === "string") && (e.scheduled === void 0 || typeof e.scheduled === "string") && (e.created === void 0 || typeof e.created === "string") && (e.preserved === void 0 || Array.isArray(e.preserved) && e.preserved.every((v) => typeof v === "string"));
+              if (!isCaptureDestination(data.destination) || typeof data.rawText !== "string" || data.rawText.length > MAX_CAPTURE_TEXT_LENGTH || !validPriority || !validDates || !validEdit) {
                 sendJson(400, { ok: false, error: "Invalid capture request." });
                 return;
               }
@@ -1321,7 +1866,8 @@ var QuickCapturePlugin = class extends import_obsidian.Plugin {
     return {
       destination: this.currentStandaloneDest,
       settings: this.settings,
-      todayStr: (0, import_obsidian.moment)().format("YYYY-MM-DD")
+      todayStr: (0, import_obsidian.moment)().format("YYYY-MM-DD"),
+      edit: this.pendingEdit
     };
   }
   async saveAttachmentFromBuffer(rawName, buffer) {
@@ -1340,6 +1886,7 @@ var QuickCapturePlugin = class extends import_obsidian.Plugin {
     return embedText;
   }
   async executeCapturePayload(payload) {
+    var _a, _b, _c, _d, _e, _f, _g, _h;
     if (!isCaptureDestination(payload.destination)) {
       throw new Error("Invalid capture destination.");
     }
@@ -1347,6 +1894,30 @@ var QuickCapturePlugin = class extends import_obsidian.Plugin {
     if (!rawText)
       return;
     const dest = payload.destination;
+    const pending = this.pendingEdit;
+    const edit = payload.edit;
+    if (dest === "task" && edit && pending && edit.path === pending.path && edit.line === pending.line && edit.originalLine === pending.originalLine) {
+      try {
+        const updated = buildEditedTaskLine(pending.originalLine, {
+          text: rawText,
+          priority: (_a = payload.taskPriority) != null ? _a : "none",
+          priorityEmoji: (_b = edit.priorityEmoji) != null ? _b : "",
+          start: (_c = payload.taskStartDate) != null ? _c : "",
+          scheduled: (_d = edit.scheduled) != null ? _d : "",
+          created: (_e = edit.created) != null ? _e : "",
+          due: (_f = payload.taskDueDate) != null ? _f : "",
+          preserved: (_g = edit.preserved) != null ? _g : [],
+          normalize: this.settings.normalizeTaskOrder
+        });
+        await this.updateTaskLineInFile(pending.path, pending.line, pending.originalLine, updated);
+        new import_obsidian.Notice("Task updated");
+      } catch (err) {
+        new import_obsidian.Notice(`Could not update task: ${err.message}`);
+      }
+      this.pendingEdit = null;
+      return;
+    }
+    this.pendingEdit = null;
     if (this.settings.rememberLastDestination) {
       this.settings.lastUsedDestination = dest;
       await this.saveSettings();
@@ -1366,12 +1937,9 @@ var QuickCapturePlugin = class extends import_obsidian.Plugin {
       if (taskAutoTag && !cleanedTask.includes(taskAutoTag)) {
         parts.push(taskAutoTag.startsWith("#") ? taskAutoTag : `#${taskAutoTag}`);
       }
-      if (payload.taskPriority === "high")
-        parts.push("\u23EB");
-      else if (payload.taskPriority === "medium")
-        parts.push("\u{1F53C}");
-      else if (payload.taskPriority === "low")
-        parts.push("\u{1F53D}");
+      const priorityEmoji = TASK_PRIORITY_EMOJI[(_h = payload.taskPriority) != null ? _h : "none"];
+      if (priorityEmoji)
+        parts.push(priorityEmoji);
       if (payload.taskStartDate)
         parts.push(`\u{1F6EB} ${payload.taskStartDate}`);
       if (payload.taskScheduledDate)
@@ -1479,6 +2047,19 @@ ${lineToInsert}
       return lines.join("\n");
     });
   }
+  async updateTaskLineInFile(filePath, line, original, updated) {
+    const file = this.app.vault.getAbstractFileByPath((0, import_obsidian.normalizePath)(filePath));
+    if (!(file instanceof import_obsidian.TFile))
+      throw new Error("Source note not found");
+    await this.app.vault.process(file, (content) => {
+      const lines = content.split(/\r?\n/);
+      const idx = lines[line] === original ? line : lines.indexOf(original);
+      if (idx === -1)
+        throw new Error("Task line changed since the editor opened");
+      lines[idx] = updated;
+      return lines.join(content.includes("\r\n") ? "\r\n" : "\n");
+    });
+  }
   async writeLineToFile(filePath, lineToInsert, position) {
     await this.ensureParentFolderExists(filePath);
     const existing = this.app.vault.getAbstractFileByPath(filePath);
@@ -1553,7 +2134,8 @@ ${currentData}`;
    * Opens Quick Capture as an independent OS floating window WITHOUT ever touching,
    * restoring, showing, or hiding the main Obsidian window!
    */
-  async triggerGlobalQuickCapture(forcedDest) {
+  async triggerGlobalQuickCapture(forcedDest, edit) {
+    this.pendingEdit = edit != null ? edit : null;
     const initialDest = forcedDest ? forcedDest : this.settings.rememberLastDestination ? this.settings.lastUsedDestination : this.settings.defaultDestination;
     this.currentStandaloneDest = initialDest;
     const opened = await this.openTrueStandaloneBrowserWindow(Boolean(forcedDest));
@@ -1786,9 +2368,32 @@ ${currentData}`;
    * - Keyboard shortcuts (Tab, Ctrl+0/J/G/W/I/T, Ctrl+D, Enter to Save, Esc to Close)
    */
   buildStandaloneBrowserWindowHtml() {
+    const calIconNames = {
+      due: "calendar",
+      start: "plane-takeoff",
+      today: "sun",
+      tomorrow: "sunrise",
+      plus3: "calendar-plus",
+      weekend: "sofa",
+      nextMon: "arrow-right-to-line",
+      plus2w: "calendar-range",
+      zap: "zap",
+      x: "x",
+      cornerDownLeft: "corner-down-left",
+      calendarDays: "calendar-days",
+      chevronLeft: "chevron-left",
+      dot: "circle",
+      chevronRight: "chevron-right",
+      paperclip: "paperclip"
+    };
+    const calIcons = {};
+    for (const key in calIconNames)
+      calIcons[key] = obsidianIconHtml(calIconNames[key]);
+    const calIconsJson = serializeForInlineScript(calIcons);
     const initialStateJson = serializeForInlineScript(this.getBridgeStatePayload());
     const svgsJson = serializeForInlineScript(LUCIDE_SVGS);
     const destMetaJson = serializeForInlineScript(DESTINATION_META);
+    const priorityMetaJson = serializeForInlineScript(TASK_PRIORITY_META);
     return `<!DOCTYPE html>
 <html>
 <head>
@@ -1814,6 +2419,8 @@ html, body {
     history.replaceState(null, '', '/');
     const SVGS = ${svgsJson};
     const DEST_META = ${destMetaJson};
+    const PRIORITY_META = ${priorityMetaJson};
+    const UI_ICONS = ${calIconsJson};
     let state = ${initialStateJson};
 
     let destination = state.destination || 'inbox';
@@ -1823,6 +2430,8 @@ html, body {
     let taskDueDate = '';
     let taskStartDate = '';
     let taskPriority = 'none';
+    let editMode = null;
+    let originalPriorityEmoji = '';
     let targetDailyDate = todayStr;
 
     let activeCalField = 'due';
@@ -1843,6 +2452,15 @@ html, body {
         }
         parent.appendChild(node);
         return node;
+    }
+
+    function priorityIconHtml(id) {
+        const meta = PRIORITY_META[id] || PRIORITY_META.none;
+        const svg = SVGS[meta.icon] || '';
+        return svg.replace('<svg ', '<svg style="color:' + meta.color + '" ');
+    }
+    function priorityButtonHtml(id, label) {
+        return priorityIconHtml(id) + '<span>' + label + '</span>';
     }
 
     function pad2(n) { return n < 10 ? '0' + n : '' + n; }
@@ -1917,8 +2535,20 @@ html, body {
         taskDueDate = '';
         taskStartDate = '';
         taskPriority = 'none';
+        originalPriorityEmoji = '';
         targetDailyDate = todayStr;
-        if (textAreaEl) textAreaEl.value = '';
+        editMode = newState && newState.edit ? newState.edit : null;
+        if (editMode) {
+            destination = 'task';
+            if (textAreaEl) textAreaEl.value = editMode.text || '';
+            taskDueDate = editMode.due || '';
+            taskStartDate = editMode.start || '';
+            taskPriority = editMode.priority || 'none';
+            originalPriorityEmoji = editMode.priorityEmoji || '';
+        }
+        if (textAreaEl && !editMode) textAreaEl.value = '';
+        if (topTitle) topTitle.innerHTML = UI_ICONS.zap + '<span>' + (editMode ? 'EDIT TASK' : 'QUICK CAPTURE') + '</span>';
+        if (submitBtn) submitBtn.innerHTML = '<span>' + (editMode ? 'Save' : 'Capture') + '</span>' + UI_ICONS.cornerDownLeft;
         closeCalPopover();
         closeDestMenu();
         setDestination(destination, false);
@@ -1980,27 +2610,34 @@ html, body {
         pillsRowEl.innerHTML = '';
         if (destination === 'task') {
             if (taskDueDate) {
-                const p = el(pillsRowEl, 'div', 'qc-pill', '\u{1F4C5} Due: ' + friendlyDate(taskDueDate));
-                const c = el(p, 'span', 'qc-pill-clear', '\xD7');
+                const p = el(pillsRowEl, 'div', 'qc-pill');
+                p.innerHTML = UI_ICONS.due + '<span>Due: ' + friendlyDate(taskDueDate) + '</span>';
+                const c = el(p, 'span', 'qc-pill-clear');
+                c.innerHTML = UI_ICONS.x;
                 c.onclick = (e) => { e.stopPropagation(); taskDueDate = ''; renderPills(); updateTargetSubtitle(); };
                 p.onclick = (e) => { e.stopPropagation(); toggleCalPopover('due'); };
             }
             if (taskStartDate) {
-                const p = el(pillsRowEl, 'div', 'qc-pill', '\u{1F6EB} Start: ' + friendlyDate(taskStartDate));
-                const c = el(p, 'span', 'qc-pill-clear', '\xD7');
+                const p = el(pillsRowEl, 'div', 'qc-pill');
+                p.innerHTML = UI_ICONS.start + '<span>Start: ' + friendlyDate(taskStartDate) + '</span>';
+                const c = el(p, 'span', 'qc-pill-clear');
+                c.innerHTML = UI_ICONS.x;
                 c.onclick = (e) => { e.stopPropagation(); taskStartDate = ''; renderPills(); updateTargetSubtitle(); };
                 p.onclick = (e) => { e.stopPropagation(); toggleCalPopover('start'); };
             }
             if (taskPriority !== 'none') {
-                const map = { high: '\u23EB High Priority', medium: '\u{1F53C} Medium Priority', low: '\u{1F53D} Low Priority' };
-                const p = el(pillsRowEl, 'div', 'qc-pill', map[taskPriority]);
-                const c = el(p, 'span', 'qc-pill-clear', '\xD7');
-                c.onclick = (e) => { e.stopPropagation(); taskPriority = 'none'; renderPills(); updateTargetSubtitle(); };
+                const p = el(pillsRowEl, 'div', 'qc-pill');
+                p.innerHTML = priorityIconHtml(taskPriority) + '<span>' + PRIORITY_META[taskPriority].label + ' Priority</span>';
+                const c = el(p, 'span', 'qc-pill-clear');
+                c.innerHTML = UI_ICONS.x;
+                c.onclick = (e) => { e.stopPropagation(); taskPriority = 'none'; originalPriorityEmoji = ''; renderPills(); updateTargetSubtitle(); };
             }
         } else if (['daily', 'journal', 'gratitude', 'win'].includes(destination)) {
             if (targetDailyDate !== todayStr) {
-                const p = el(pillsRowEl, 'div', 'qc-pill', '\u{1F4C6} Target Day: ' + friendlyDate(targetDailyDate));
-                const c = el(p, 'span', 'qc-pill-clear', '\xD7');
+                const p = el(pillsRowEl, 'div', 'qc-pill');
+                p.innerHTML = UI_ICONS.calendarDays + '<span>Target Day: ' + friendlyDate(targetDailyDate) + '</span>';
+                const c = el(p, 'span', 'qc-pill-clear');
+                c.innerHTML = UI_ICONS.x;
                 c.onclick = (e) => { e.stopPropagation(); targetDailyDate = todayStr; renderPills(); updateTargetSubtitle(); };
                 p.onclick = (e) => { e.stopPropagation(); toggleCalPopover('dailyTarget'); };
             }
@@ -2063,8 +2700,10 @@ html, body {
 
         if (destination === 'task') {
             const tabs = el(pop, 'div', 'qc-cal-type-tabs');
-            const dueBtn = el(tabs, 'button', 'qc-cal-type-tab ' + (activeCalField === 'due' ? 'is-active' : ''), '\u{1F4C5} Due Date', { type: 'button' });
-            const startBtn = el(tabs, 'button', 'qc-cal-type-tab ' + (activeCalField === 'start' ? 'is-active' : ''), '\u{1F6EB} Start Date', { type: 'button' });
+            const dueBtn = el(tabs, 'button', 'qc-cal-type-tab ' + (activeCalField === 'due' ? 'is-active' : ''), undefined, { type: 'button' });
+            dueBtn.innerHTML = (UI_ICONS.due || '') + '<span>Due Date</span>';
+            const startBtn = el(tabs, 'button', 'qc-cal-type-tab ' + (activeCalField === 'start' ? 'is-active' : ''), undefined, { type: 'button' });
+            startBtn.innerHTML = (UI_ICONS.start || '') + '<span>Start Date</span>';
             dueBtn.onclick = () => { activeCalField = 'due'; renderCalPopover(); };
             startBtn.onclick = () => { activeCalField = 'start'; renderCalPopover(); };
         }
@@ -2072,6 +2711,8 @@ html, body {
         const presetsGrid = el(pop, 'div', 'qc-cal-presets');
         const dToday = parseYMD(todayStr);
         const dTom = new Date(dToday.getFullYear(), dToday.getMonth(), dToday.getDate() + 1);
+        const d3 = new Date(dToday.getFullYear(), dToday.getMonth(), dToday.getDate() + 3);
+        const d14 = new Date(dToday.getFullYear(), dToday.getMonth(), dToday.getDate() + 14);
         const daysToSat = (6 - dToday.getDay() + 7) % 7 || 7;
         const dSat = new Date(dToday.getFullYear(), dToday.getMonth(), dToday.getDate() + daysToSat);
         const daysToMon = (1 - dToday.getDay() + 7) % 7 || 7;
@@ -2082,13 +2723,15 @@ html, body {
         const monthsFull = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
         [
-            { label: '\u2605 Today', sub: daysShort[dToday.getDay()], val: fmtYMD(dToday) },
-            { label: '\u2600 Tomorrow', sub: daysShort[dTom.getDay()], val: fmtYMD(dTom) },
-            { label: '\u{1F6CB} Weekend', sub: monthsShort[dSat.getMonth()] + ' ' + dSat.getDate(), val: fmtYMD(dSat) },
-            { label: '\u21E5 Next Mon', sub: monthsShort[dMon.getMonth()] + ' ' + dMon.getDate(), val: fmtYMD(dMon) }
+            { icon: 'today', label: 'Today', sub: daysShort[dToday.getDay()], val: fmtYMD(dToday) },
+            { icon: 'tomorrow', label: 'Tomorrow', sub: daysShort[dTom.getDay()], val: fmtYMD(dTom) },
+            { icon: 'plus3', label: '+3 Days', sub: monthsShort[d3.getMonth()] + ' ' + d3.getDate(), val: fmtYMD(d3) },
+            { icon: 'weekend', label: 'Weekend', sub: monthsShort[dSat.getMonth()] + ' ' + dSat.getDate(), val: fmtYMD(dSat) },
+            { icon: 'nextMon', label: 'Next Mon', sub: monthsShort[dMon.getMonth()] + ' ' + dMon.getDate(), val: fmtYMD(dMon) },
+            { icon: 'plus2w', label: '+2 Weeks', sub: monthsShort[d14.getMonth()] + ' ' + d14.getDate(), val: fmtYMD(d14) }
         ].forEach((p) => {
-            const b = el(presetsGrid, 'button', 'qc-cal-preset-btn', undefined, { type: 'button' });
-            el(b, 'span', undefined, p.label);
+            const b = el(presetsGrid, 'button', 'qc-cal-preset-btn qc-cal-quick-chip', undefined, { type: 'button' });
+            b.innerHTML = (UI_ICONS[p.icon] || '') + '<span>' + p.label + '</span>';
             el(b, 'span', 'qc-cal-preset-sub', p.sub);
             b.onclick = () => setActiveCalVal(p.val);
         });
@@ -2096,9 +2739,12 @@ html, body {
         const hdr = el(pop, 'div', 'qc-cal-header');
         el(hdr, 'span', undefined, monthsFull[calViewMonth] + ' ' + calViewYear);
         const nav = el(hdr, 'div', 'qc-cal-nav');
-        const prev = el(nav, 'button', 'qc-cal-nav-btn', '\u25C0', { type: 'button' });
-        const dot = el(nav, 'button', 'qc-cal-nav-btn', '\u25CF', { type: 'button' });
-        const next = el(nav, 'button', 'qc-cal-nav-btn', '\u25B6', { type: 'button' });
+        const prev = el(nav, 'button', 'qc-cal-nav-btn', undefined, { type: 'button' });
+        prev.innerHTML = UI_ICONS.chevronLeft;
+        const dot = el(nav, 'button', 'qc-cal-nav-btn', undefined, { type: 'button' });
+        dot.innerHTML = UI_ICONS.dot;
+        const next = el(nav, 'button', 'qc-cal-nav-btn', undefined, { type: 'button' });
+        next.innerHTML = UI_ICONS.chevronRight;
 
         prev.onclick = () => {
             calViewMonth--;
@@ -2137,15 +2783,19 @@ html, body {
         if (destination === 'task') {
             const prioRow = el(pop, 'div', 'qc-cal-presets');
             [
-                { id: 'high', label: '\u23EB High' },
-                { id: 'medium', label: '\u{1F53C} Med' },
-                { id: 'low', label: '\u{1F53D} Low' },
-                { id: 'none', label: '\u25CB Normal' }
+                { id: 'highest', label: 'Highest' },
+                { id: 'high', label: 'High' },
+                { id: 'medium', label: 'Med' },
+                { id: 'low', label: 'Low' },
+                { id: 'lowest', label: 'Lowest' },
+                { id: 'none', label: 'Normal' }
             ].forEach((pr) => {
-                const pb = el(prioRow, 'button', 'qc-cal-preset-btn', pr.label, { type: 'button' });
+                const pb = el(prioRow, 'button', 'qc-cal-preset-btn', undefined, { type: 'button' });
+                pb.innerHTML = priorityButtonHtml(pr.id, pr.label);
                 if (taskPriority === pr.id && pr.id !== 'none') pb.style.borderColor = '#8b5cf6';
                 pb.onclick = () => {
                     taskPriority = pr.id;
+                    originalPriorityEmoji = '';
                     renderPills();
                     updateTargetSubtitle();
                     renderCalPopover();
@@ -2203,7 +2853,16 @@ html, body {
             taskDueDate,
             taskStartDate,
             taskPriority,
-            targetDailyDate
+            targetDailyDate,
+            edit: editMode ? {
+                path: editMode.path,
+                line: editMode.line,
+                originalLine: editMode.originalLine,
+                priorityEmoji: originalPriorityEmoji,
+                scheduled: editMode.scheduled || '',
+                created: editMode.created || '',
+                preserved: editMode.preserved || []
+            } : undefined
         });
         textAreaEl.value = '';
         isSubmitting = false;
@@ -2211,8 +2870,10 @@ html, body {
 
     // Build UI
     const topBar = el(root, 'div', 'qc-top-bar');
-    el(topBar, 'div', 'qc-top-title', '\u26A1 QUICK CAPTURE');
-    const topClose = el(topBar, 'button', 'qc-top-close', '\xD7', { type: 'button', title: 'Close (Esc)' });
+    const topTitle = el(topBar, 'div', 'qc-top-title');
+    topTitle.innerHTML = UI_ICONS.zap + '<span>QUICK CAPTURE</span>';
+    const topClose = el(topBar, 'button', 'qc-top-close', undefined, { type: 'button', title: 'Close (Esc)' });
+    topClose.innerHTML = UI_ICONS.x;
     topClose.onclick = () => closePopup();
 
     const textWrap = el(root, 'div', 'qc-textarea-wrapper');
@@ -2239,7 +2900,7 @@ html, body {
     dailyCalBtnEl.onclick = (e) => { e.stopPropagation(); closeDestMenu(); toggleCalPopover('dailyTarget'); };
 
     const attachBtn = el(bottomRight, 'button', 'qc-icon-btn', undefined, { type: 'button', title: 'Attach File / Screenshot' });
-    attachBtn.innerHTML = SVGS['paperclip'];
+    attachBtn.innerHTML = UI_ICONS.paperclip;
     fileInputEl = el(bottomRight, 'input', undefined, undefined, { type: 'file', multiple: 'true', style: 'display:none;' });
     attachBtn.onclick = () => fileInputEl.click();
     fileInputEl.onchange = async () => {
@@ -2250,7 +2911,8 @@ html, body {
         }
     };
 
-    const submitBtn = el(bottomRight, 'button', 'qc-btn-submit', 'Capture \u21B5', { type: 'button' });
+    const submitBtn = el(bottomRight, 'button', 'qc-btn-submit', undefined, { type: 'button' });
+    submitBtn.innerHTML = '<span>Capture</span>' + UI_ICONS.cornerDownLeft;
     submitBtn.onclick = () => submitCapture();
 
     const strip = el(root, 'div', 'qc-shortcut-strip');
@@ -2324,8 +2986,7 @@ html, body {
         if (files && files.length > 0) await handleFiles(files);
     });
 
-    setDestination(destination, false);
-    focusInput();
+    window.__qcReset(state);
 })();
 <\/script>
 </body>
@@ -2544,11 +3205,13 @@ var QuickCaptureViewController = class {
     this.rootEl.innerHTML = "";
     if (this.isStandaloneWindow) {
       const topBar = this.el(this.rootEl, "div", "qc-top-bar");
-      this.el(topBar, "div", "qc-top-title", "\u26A1 QUICK CAPTURE");
-      const topClose = this.el(topBar, "button", "qc-top-close", "\xD7", {
+      const topTitle = this.el(topBar, "div", "qc-top-title");
+      topTitle.innerHTML = obsidianIconHtml("zap") + "<span>QUICK CAPTURE</span>";
+      const topClose = this.el(topBar, "button", "qc-top-close", void 0, {
         type: "button",
         title: "Close (Esc)"
       });
+      topClose.innerHTML = obsidianIconHtml("x");
       topClose.addEventListener("click", () => this.onCloseCallback());
     }
     const textWrapper = this.el(this.rootEl, "div", "qc-textarea-wrapper");
@@ -2590,7 +3253,7 @@ var QuickCaptureViewController = class {
       type: "button",
       title: "Attach Image or File (or Paste with Ctrl+V / Drag & Drop)"
     });
-    attachBtn.innerHTML = LUCIDE_SVGS["paperclip"];
+    attachBtn.innerHTML = obsidianIconHtml("paperclip");
     this.fileInputEl = this.el(bottomRight, "input", void 0, void 0, {
       type: "file",
       multiple: "true",
@@ -2604,9 +3267,10 @@ var QuickCaptureViewController = class {
         this.focusInput();
       }
     });
-    const submitBtn = this.el(bottomRight, "button", "qc-btn-submit", "Capture \u21B5", {
+    const submitBtn = this.el(bottomRight, "button", "qc-btn-submit", void 0, {
       type: "button"
     });
+    submitBtn.innerHTML = "<span>Capture</span>" + obsidianIconHtml("corner-down-left");
     submitBtn.addEventListener("click", () => this.submitCapture());
     const shortcutStrip = this.el(this.rootEl, "div", "qc-shortcut-strip");
     const submitKey = this.plugin.settings.submitOnEnter ? "Enter" : "Ctrl+Enter";
@@ -2807,12 +3471,20 @@ var QuickCaptureViewController = class {
     const hasCustomDaily = this.targetDailyDate !== (0, import_obsidian.moment)().format("YYYY-MM-DD");
     this.dailyTargetDateBtnEl.classList.toggle("has-value", hasCustomDaily);
   }
+  priorityIconHtml(priority) {
+    var _a, _b;
+    const meta = (_a = TASK_PRIORITY_META[priority]) != null ? _a : TASK_PRIORITY_META.none;
+    const svg = (_b = LUCIDE_SVGS[meta.icon]) != null ? _b : "";
+    return svg.replace("<svg ", `<svg style="color:${meta.color}" `);
+  }
   renderPills() {
     this.pillsRowEl.innerHTML = "";
     if (this.destination === "task") {
       if (this.taskDueDate) {
-        const pill = this.el(this.pillsRowEl, "div", "qc-pill", `\u{1F4C5} Due: ${this.formatFriendlyDate(this.taskDueDate)}`);
-        const clear = this.el(pill, "span", "qc-pill-clear", "\xD7");
+        const pill = this.el(this.pillsRowEl, "div", "qc-pill");
+        pill.innerHTML = obsidianIconHtml("calendar") + "<span>Due: " + this.formatFriendlyDate(this.taskDueDate) + "</span>";
+        const clear = this.el(pill, "span", "qc-pill-clear");
+        clear.innerHTML = obsidianIconHtml("x");
         clear.addEventListener("click", (e) => {
           e.stopPropagation();
           this.taskDueDate = "";
@@ -2825,8 +3497,10 @@ var QuickCaptureViewController = class {
         });
       }
       if (this.taskStartDate) {
-        const pill = this.el(this.pillsRowEl, "div", "qc-pill", `\u{1F6EB} Start: ${this.formatFriendlyDate(this.taskStartDate)}`);
-        const clear = this.el(pill, "span", "qc-pill-clear", "\xD7");
+        const pill = this.el(this.pillsRowEl, "div", "qc-pill");
+        pill.innerHTML = obsidianIconHtml("plane-takeoff") + "<span>Start: " + this.formatFriendlyDate(this.taskStartDate) + "</span>";
+        const clear = this.el(pill, "span", "qc-pill-clear");
+        clear.innerHTML = obsidianIconHtml("x");
         clear.addEventListener("click", (e) => {
           e.stopPropagation();
           this.taskStartDate = "";
@@ -2839,14 +3513,10 @@ var QuickCaptureViewController = class {
         });
       }
       if (this.taskPriority !== "none") {
-        const emojiMap = {
-          none: "",
-          high: "\u23EB High Priority",
-          medium: "\u{1F53C} Medium Priority",
-          low: "\u{1F53D} Low Priority"
-        };
-        const pill = this.el(this.pillsRowEl, "div", "qc-pill", emojiMap[this.taskPriority]);
-        const clear = this.el(pill, "span", "qc-pill-clear", "\xD7");
+        const pill = this.el(this.pillsRowEl, "div", "qc-pill");
+        pill.innerHTML = this.priorityIconHtml(this.taskPriority) + "<span>" + TASK_PRIORITY_META[this.taskPriority].label + " Priority</span>";
+        const clear = this.el(pill, "span", "qc-pill-clear");
+        clear.innerHTML = obsidianIconHtml("x");
         clear.addEventListener("click", (e) => {
           e.stopPropagation();
           this.taskPriority = "none";
@@ -2857,8 +3527,10 @@ var QuickCaptureViewController = class {
     } else if (["daily", "journal", "gratitude", "win"].includes(this.destination)) {
       const todayStr = (0, import_obsidian.moment)().format("YYYY-MM-DD");
       if (this.targetDailyDate !== todayStr) {
-        const pill = this.el(this.pillsRowEl, "div", "qc-pill", `\u{1F4C6} Target Day: ${this.formatFriendlyDate(this.targetDailyDate)}`);
-        const clear = this.el(pill, "span", "qc-pill-clear", "\xD7");
+        const pill = this.el(this.pillsRowEl, "div", "qc-pill");
+        pill.innerHTML = obsidianIconHtml("calendar-days") + "<span>Target Day: " + this.formatFriendlyDate(this.targetDailyDate) + "</span>";
+        const clear = this.el(pill, "span", "qc-pill-clear");
+        clear.innerHTML = obsidianIconHtml("x");
         clear.addEventListener("click", (e) => {
           e.stopPropagation();
           this.targetDailyDate = todayStr;
@@ -2935,16 +3607,18 @@ var QuickCaptureViewController = class {
         typeTabs,
         "button",
         `qc-cal-type-tab ${this.activeCalendarField === "due" ? "is-active" : ""}`,
-        "\u{1F4C5} Due Date",
+        void 0,
         { type: "button" }
       );
+      dueTab.innerHTML = obsidianIconHtml("calendar") + "<span>Due Date</span>";
       const startTab = this.el(
         typeTabs,
         "button",
         `qc-cal-type-tab ${this.activeCalendarField === "start" ? "is-active" : ""}`,
-        "\u{1F6EB} Start Date",
+        void 0,
         { type: "button" }
       );
+      startTab.innerHTML = obsidianIconHtml("plane-takeoff") + "<span>Start Date</span>";
       dueTab.addEventListener("click", () => {
         this.activeCalendarField = "due";
         this.renderCalendarPopover();
@@ -2960,26 +3634,29 @@ var QuickCaptureViewController = class {
     const saturday = (0, import_obsidian.moment)().day(6).isSameOrBefore(today, "day") ? (0, import_obsidian.moment)().add(1, "weeks").day(6) : (0, import_obsidian.moment)().day(6);
     const nextMonday = (0, import_obsidian.moment)().add(1, "weeks").isoWeekday(1);
     const presets = [
-      { label: "\u2605 Today", sub: today.format("ddd"), val: today.format("YYYY-MM-DD") },
-      { label: "\u2600 Tomorrow", sub: tomorrow.format("ddd"), val: tomorrow.format("YYYY-MM-DD") },
-      { label: "\u{1F6CB} Weekend", sub: saturday.format("MMM D"), val: saturday.format("YYYY-MM-DD") },
-      { label: "\u21E5 Next Mon", sub: nextMonday.format("MMM D"), val: nextMonday.format("YYYY-MM-DD") }
+      { icon: "sun", label: "Today", sub: today.format("ddd"), val: today.format("YYYY-MM-DD") },
+      { icon: "sunrise", label: "Tomorrow", sub: tomorrow.format("ddd"), val: tomorrow.format("YYYY-MM-DD") },
+      { icon: "sofa", label: "Weekend", sub: saturday.format("MMM D"), val: saturday.format("YYYY-MM-DD") },
+      { icon: "arrow-right-to-line", label: "Next Mon", sub: nextMonday.format("MMM D"), val: nextMonday.format("YYYY-MM-DD") }
     ];
     presets.forEach((p) => {
       const btn = this.el(presetsGrid, "button", "qc-cal-preset-btn", void 0, { type: "button" });
-      this.el(btn, "span", void 0, p.label);
+      btn.innerHTML = obsidianIconHtml(p.icon) + "<span>" + p.label + "</span>";
       this.el(btn, "span", "qc-cal-preset-sub", p.sub);
       btn.addEventListener("click", () => this.setActiveCalendarDateValue(p.val));
     });
     const calHeader = this.el(popover, "div", "qc-cal-header");
     this.el(calHeader, "span", void 0, this.calendarViewMonth.format("MMMM YYYY"));
     const navGroup = this.el(calHeader, "div", "qc-cal-nav");
-    const prevBtn = this.el(navGroup, "button", "qc-cal-nav-btn", "\u25C0", { type: "button" });
-    const todayJumpBtn = this.el(navGroup, "button", "qc-cal-nav-btn", "\u25CF", {
+    const prevBtn = this.el(navGroup, "button", "qc-cal-nav-btn", void 0, { type: "button" });
+    prevBtn.innerHTML = obsidianIconHtml("chevron-left");
+    const todayJumpBtn = this.el(navGroup, "button", "qc-cal-nav-btn", void 0, {
       type: "button",
       title: "Jump to Current Month"
     });
-    const nextBtn = this.el(navGroup, "button", "qc-cal-nav-btn", "\u25B6", { type: "button" });
+    todayJumpBtn.innerHTML = obsidianIconHtml("circle");
+    const nextBtn = this.el(navGroup, "button", "qc-cal-nav-btn", void 0, { type: "button" });
+    nextBtn.innerHTML = obsidianIconHtml("chevron-right");
     prevBtn.addEventListener("click", () => {
       this.calendarViewMonth = this.calendarViewMonth.clone().subtract(1, "months");
       this.renderCalendarPopover();
@@ -3020,13 +3697,16 @@ var QuickCaptureViewController = class {
     if (this.destination === "task") {
       const prioRow = this.el(popover, "div", "qc-cal-presets");
       const prios = [
-        { id: "high", label: "\u23EB High" },
-        { id: "medium", label: "\u{1F53C} Med" },
-        { id: "low", label: "\u{1F53D} Low" },
-        { id: "none", label: "\u25CB Normal" }
+        { id: "highest", label: "Highest" },
+        { id: "high", label: "High" },
+        { id: "medium", label: "Med" },
+        { id: "low", label: "Low" },
+        { id: "lowest", label: "Lowest" },
+        { id: "none", label: "Normal" }
       ];
       prios.forEach((pr) => {
-        const pBtn = this.el(prioRow, "button", "qc-cal-preset-btn", pr.label, { type: "button" });
+        const pBtn = this.el(prioRow, "button", "qc-cal-preset-btn", void 0, { type: "button" });
+        pBtn.innerHTML = this.priorityIconHtml(pr.id) + "<span>" + pr.label + "</span>";
         if (this.taskPriority === pr.id && pr.id !== "none") {
           pBtn.style.borderColor = "#8b5cf6";
         }
@@ -3099,6 +3779,30 @@ var QuickCaptureViewController = class {
     }
   }
 };
+var TaskEditPickerModal = class extends import_obsidian.Modal {
+  constructor(app, candidates, onPick) {
+    super(app);
+    this.candidates = candidates;
+    this.onPick = onPick;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl("h2", { text: "Which task should Quick Capture edit?" });
+    for (const candidate of this.candidates) {
+      const button = contentEl.createEl("button", {
+        cls: "qc-pick-btn",
+        text: `${candidate.path} : ${candidate.line + 1} \u2014 ${candidate.description || candidate.originalLine}`
+      });
+      button.addEventListener("click", () => {
+        this.onPick(candidate);
+        this.close();
+      });
+    }
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
 var PurgeCompletedTasksModal = class extends import_obsidian.Modal {
   constructor(app, plugin) {
     super(app);
@@ -3147,10 +3851,12 @@ var QuickCaptureSettingTab = class extends import_obsidian.PluginSettingTab {
     containerEl.createEl("h2", { text: "Quick Capture Settings" });
     const detected = this.plugin.scanAndDetectVaultConfig(false);
     const infoBox = containerEl.createDiv({ cls: "qc-detected-info" });
-    infoBox.createEl("strong", { text: "\u26A1 Live Detected Vault Settings:" });
+    const detectedTitle = infoBox.createEl("strong");
+    detectedTitle.innerHTML = obsidianIconHtml("zap") + "<span>Live Detected Vault Settings:</span>";
     const addDetectedLine = (label, value) => {
       const line = infoBox.createDiv({ cls: "qc-detected-line" });
-      line.createEl("strong", { text: `\u2022 ${label}:` });
+      const labelEl = line.createEl("strong");
+      labelEl.innerHTML = obsidianIconHtml("circle") + "<span>" + label + ":</span>";
       line.createEl("code", { text: value });
     };
     addDetectedLine(
@@ -3165,7 +3871,8 @@ var QuickCaptureSettingTab = class extends import_obsidian.PluginSettingTab {
     const dailyExample = (0, import_obsidian.moment)().format(dailyFormat);
     const dailyFilePath = detected.dailyFolder ? `${detected.dailyFolder}/${dailyExample}.md` : `/${dailyExample}.md`;
     const dailyLine = infoBox.createDiv({ cls: "qc-detected-daily" });
-    dailyLine.createEl("strong", { cls: "qc-detected-daily-label", text: "\u2022 Daily Notes:" });
+    const dailyLabel = dailyLine.createEl("strong", { cls: "qc-detected-daily-label" });
+    dailyLabel.innerHTML = obsidianIconHtml("circle") + "<span>Daily Notes:</span>";
     const dailyDetails = dailyLine.createDiv({ cls: "qc-detected-daily-details" });
     const formatLine = dailyDetails.createDiv();
     formatLine.createEl("span", { text: "Format: " });
