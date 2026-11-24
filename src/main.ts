@@ -906,6 +906,18 @@ export default class QuickCapturePlugin extends Plugin {
             }
         });
 
+        this.addCommand({
+            id: 'send-to-inbox',
+            name: 'Send to Inbox',
+            editorCheckCallback: (checking, editor) => {
+                const selectedText = editor.getSelection();
+                if (!selectedText || selectedText.trim().length === 0) return false;
+                if (checking) return true;
+                void this.sendSelectionToInbox(editor, selectedText);
+                return true;
+            }
+        });
+
         (Object.keys(DESTINATION_META) as CaptureDestination[]).forEach((dest) => {
             this.addCommand({
                 id: `open-quick-capture-${dest}`,
@@ -1765,7 +1777,6 @@ export default class QuickCapturePlugin extends Plugin {
         }
 
         const now = moment();
-        const formattedTime = now.format(this.settings.timestampFormat || 'YYYY-MM-DD HH:mm');
 
         if (dest === 'task') {
             const targetPath = normalizePath(this.settings.tasksFilePath || 'Master Task List.md');
@@ -1813,35 +1824,7 @@ export default class QuickCapturePlugin extends Plugin {
             }
             new Notice(`Task added to ${targetPath}`);
         } else if (dest === 'inbox') {
-            if (this.settings.inboxMode === 'new-note-first-line') {
-                const lines = rawText.split(/\r?\n/);
-                const firstLine =
-                    lines[0].replace(/[\\/:*?"<>|#]/g, '').trim() ||
-                    `Quick Note ${moment().format('YYYY-MM-DD HHmmss')}`;
-                const body = lines.slice(1).join('\n').trim();
-                const folder = this.settings.inboxFolderPath.trim();
-                const rawPath = folder ? `${folder}/${firstLine}.md` : `${firstLine}.md`;
-                const fullPath = normalizePath(rawPath);
-
-                await this.ensureParentFolderExists(fullPath);
-
-                let finalPath = fullPath;
-                let counter = 1;
-                while (this.app.vault.getAbstractFileByPath(finalPath)) {
-                    finalPath = fullPath.replace(/\.md$/, ` ${counter}.md`);
-                    counter++;
-                }
-
-                await this.app.vault.create(finalPath, (body ? body : rawText) + '\n');
-                new Notice(`Created ${finalPath}`);
-            } else {
-                const targetPath = normalizePath(this.settings.inboxFilePath || 'inbox.md');
-                const entry = this.settings.includeTimestampInInbox
-                    ? `- **${formattedTime}** — ${rawText}`
-                    : `- ${rawText}`;
-                await this.writeLineToFile(targetPath, entry, this.settings.inboxInsertPosition);
-                new Notice(`Captured to ${targetPath}`);
-            }
+            await this.captureToInbox(rawText);
         } else {
             const targetDateStr = payload.targetDailyDate || now.format('YYYY-MM-DD');
             const targetMoment = moment(targetDateStr, 'YYYY-MM-DD');
@@ -1867,6 +1850,57 @@ export default class QuickCapturePlugin extends Plugin {
 
             await this.insertUnderHeading(dailyFile, heading, bulletLine);
             new Notice(`Captured to ${dailyFile.path}${heading ? ` (${heading})` : ''}`);
+        }
+    }
+
+    /**
+     * Shared inbox pipeline used by both the capture modal and the
+     * "Send to Inbox" editor command. Throws on failure so callers can avoid
+     * destructive follow-up actions such as deleting the selected text.
+     */
+    public async captureToInbox(rawText: string): Promise<void> {
+        const text = (rawText || '').trim();
+        if (!text) return;
+
+        if (this.settings.inboxMode === 'new-note-first-line') {
+            const lines = text.split(/\r?\n/);
+            const firstLine =
+                lines[0].replace(/[\\/:*?"<>|#]/g, '').trim() ||
+                `Quick Note ${moment().format('YYYY-MM-DD HHmmss')}`;
+            const body = lines.slice(1).join('\n').trim();
+            const folder = this.settings.inboxFolderPath.trim();
+            const rawPath = folder ? `${folder}/${firstLine}.md` : `${firstLine}.md`;
+            const fullPath = normalizePath(rawPath);
+
+            await this.ensureParentFolderExists(fullPath);
+
+            let finalPath = fullPath;
+            let counter = 1;
+            while (this.app.vault.getAbstractFileByPath(finalPath)) {
+                finalPath = fullPath.replace(/\.md$/, ` ${counter}.md`);
+                counter++;
+            }
+
+            await this.app.vault.create(finalPath, (body ? body : text) + '\n');
+            new Notice(`Created ${finalPath}`);
+        } else {
+            const targetPath = normalizePath(this.settings.inboxFilePath || 'inbox.md');
+            const formattedTime = moment().format(this.settings.timestampFormat || 'YYYY-MM-DD HH:mm');
+            const entry = this.settings.includeTimestampInInbox
+                ? `- **${formattedTime}** — ${text}`
+                : `- ${text}`;
+            await this.writeLineToFile(targetPath, entry, this.settings.inboxInsertPosition);
+            new Notice(`Captured to ${targetPath}`);
+        }
+    }
+
+    private async sendSelectionToInbox(editor: Editor, selectedText: string): Promise<void> {
+        try {
+            await this.captureToInbox(selectedText);
+            editor.replaceSelection('');
+        } catch (err) {
+            console.error('QuickCapture: Send to Inbox failed:', err);
+            new Notice(`Could not send to Inbox: ${(err as Error).message}`);
         }
     }
 

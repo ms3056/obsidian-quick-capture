@@ -1180,6 +1180,19 @@ var QuickCapturePlugin = class extends import_obsidian.Plugin {
         return true;
       }
     });
+    this.addCommand({
+      id: "send-to-inbox",
+      name: "Send to Inbox",
+      editorCheckCallback: (checking, editor) => {
+        const selectedText = editor.getSelection();
+        if (!selectedText || selectedText.trim().length === 0)
+          return false;
+        if (checking)
+          return true;
+        void this.sendSelectionToInbox(editor, selectedText);
+        return true;
+      }
+    });
     Object.keys(DESTINATION_META).forEach((dest) => {
       this.addCommand({
         id: `open-quick-capture-${dest}`,
@@ -1923,7 +1936,6 @@ var QuickCapturePlugin = class extends import_obsidian.Plugin {
       await this.saveSettings();
     }
     const now = (0, import_obsidian.moment)();
-    const formattedTime = now.format(this.settings.timestampFormat || "YYYY-MM-DD HH:mm");
     if (dest === "task") {
       const targetPath = (0, import_obsidian.normalizePath)(this.settings.tasksFilePath || "Master Task List.md");
       const cleanedTask = rawText.replace(/^-\s*\[[ xX]?\]\s*/, "");
@@ -1961,28 +1973,7 @@ var QuickCapturePlugin = class extends import_obsidian.Plugin {
       }
       new import_obsidian.Notice(`Task added to ${targetPath}`);
     } else if (dest === "inbox") {
-      if (this.settings.inboxMode === "new-note-first-line") {
-        const lines = rawText.split(/\r?\n/);
-        const firstLine = lines[0].replace(/[\\/:*?"<>|#]/g, "").trim() || `Quick Note ${(0, import_obsidian.moment)().format("YYYY-MM-DD HHmmss")}`;
-        const body = lines.slice(1).join("\n").trim();
-        const folder = this.settings.inboxFolderPath.trim();
-        const rawPath = folder ? `${folder}/${firstLine}.md` : `${firstLine}.md`;
-        const fullPath = (0, import_obsidian.normalizePath)(rawPath);
-        await this.ensureParentFolderExists(fullPath);
-        let finalPath = fullPath;
-        let counter = 1;
-        while (this.app.vault.getAbstractFileByPath(finalPath)) {
-          finalPath = fullPath.replace(/\.md$/, ` ${counter}.md`);
-          counter++;
-        }
-        await this.app.vault.create(finalPath, (body ? body : rawText) + "\n");
-        new import_obsidian.Notice(`Created ${finalPath}`);
-      } else {
-        const targetPath = (0, import_obsidian.normalizePath)(this.settings.inboxFilePath || "inbox.md");
-        const entry = this.settings.includeTimestampInInbox ? `- **${formattedTime}** \u2014 ${rawText}` : `- ${rawText}`;
-        await this.writeLineToFile(targetPath, entry, this.settings.inboxInsertPosition);
-        new import_obsidian.Notice(`Captured to ${targetPath}`);
-      }
+      await this.captureToInbox(rawText);
     } else {
       const targetDateStr = payload.targetDailyDate || now.format("YYYY-MM-DD");
       const targetMoment = (0, import_obsidian.moment)(targetDateStr, "YYYY-MM-DD");
@@ -2004,6 +1995,48 @@ var QuickCapturePlugin = class extends import_obsidian.Plugin {
       const bulletLine = `- **${timePrefix}**${tagPart} ${rawText}`;
       await this.insertUnderHeading(dailyFile, heading, bulletLine);
       new import_obsidian.Notice(`Captured to ${dailyFile.path}${heading ? ` (${heading})` : ""}`);
+    }
+  }
+  /**
+   * Shared inbox pipeline used by both the capture modal and the
+   * "Send to Inbox" editor command. Throws on failure so callers can avoid
+   * destructive follow-up actions such as deleting the selected text.
+   */
+  async captureToInbox(rawText) {
+    const text = (rawText || "").trim();
+    if (!text)
+      return;
+    if (this.settings.inboxMode === "new-note-first-line") {
+      const lines = text.split(/\r?\n/);
+      const firstLine = lines[0].replace(/[\\/:*?"<>|#]/g, "").trim() || `Quick Note ${(0, import_obsidian.moment)().format("YYYY-MM-DD HHmmss")}`;
+      const body = lines.slice(1).join("\n").trim();
+      const folder = this.settings.inboxFolderPath.trim();
+      const rawPath = folder ? `${folder}/${firstLine}.md` : `${firstLine}.md`;
+      const fullPath = (0, import_obsidian.normalizePath)(rawPath);
+      await this.ensureParentFolderExists(fullPath);
+      let finalPath = fullPath;
+      let counter = 1;
+      while (this.app.vault.getAbstractFileByPath(finalPath)) {
+        finalPath = fullPath.replace(/\.md$/, ` ${counter}.md`);
+        counter++;
+      }
+      await this.app.vault.create(finalPath, (body ? body : text) + "\n");
+      new import_obsidian.Notice(`Created ${finalPath}`);
+    } else {
+      const targetPath = (0, import_obsidian.normalizePath)(this.settings.inboxFilePath || "inbox.md");
+      const formattedTime = (0, import_obsidian.moment)().format(this.settings.timestampFormat || "YYYY-MM-DD HH:mm");
+      const entry = this.settings.includeTimestampInInbox ? `- **${formattedTime}** \u2014 ${text}` : `- ${text}`;
+      await this.writeLineToFile(targetPath, entry, this.settings.inboxInsertPosition);
+      new import_obsidian.Notice(`Captured to ${targetPath}`);
+    }
+  }
+  async sendSelectionToInbox(editor, selectedText) {
+    try {
+      await this.captureToInbox(selectedText);
+      editor.replaceSelection("");
+    } catch (err) {
+      console.error("QuickCapture: Send to Inbox failed:", err);
+      new import_obsidian.Notice(`Could not send to Inbox: ${err.message}`);
     }
   }
   async insertUnderHeading(file, heading, lineToInsert) {

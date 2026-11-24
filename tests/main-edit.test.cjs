@@ -209,3 +209,69 @@ test('post-processor observes Tasks blocks before any rows are rendered', async 
     global.document = originalDocument;
   }
 });
+
+test('send-to-inbox command is gated on a non-empty selection', async () => {
+  const { plugin } = makePlugin();
+  await plugin.onload();
+  const cmd = commands.find((c) => c.id === 'send-to-inbox');
+  assert.ok(cmd, 'command registered');
+  assert.equal(cmd.name, 'Send to Inbox');
+  assert.equal(cmd.editorCheckCallback(true, { getSelection: () => '' }), false);
+  assert.equal(cmd.editorCheckCallback(true, { getSelection: () => '   ' }), false);
+  assert.equal(cmd.editorCheckCallback(true, { getSelection: () => 'hello' }), true);
+});
+
+test('send-to-inbox captures first, then clears the selection', async () => {
+  const { plugin } = makePlugin();
+  await plugin.onload();
+  const cmd = commands.find((c) => c.id === 'send-to-inbox');
+  let resolveCapture;
+  const captured = [];
+  plugin.captureToInbox = async (text) => {
+    captured.push(text);
+    await new Promise((resolve) => { resolveCapture = resolve; });
+  };
+  const replacements = [];
+  const editor = {
+    getSelection: () => 'line 1\nline 2',
+    replaceSelection: (value) => replacements.push(value)
+  };
+  assert.equal(cmd.editorCheckCallback(false, editor, {}), true);
+  assert.equal(replacements.length, 0, 'selection stays until capture finishes');
+  resolveCapture();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(captured, ['line 1\nline 2']);
+  assert.deepEqual(replacements, ['']);
+});
+
+test('send-to-inbox keeps the selection when capture fails', async () => {
+  const { plugin } = makePlugin();
+  await plugin.onload();
+  const cmd = commands.find((c) => c.id === 'send-to-inbox');
+  plugin.captureToInbox = async () => { throw new Error('boom'); };
+  let replacements = 0;
+  const editor = {
+    getSelection: () => 'keep me',
+    replaceSelection: () => { replacements += 1; }
+  };
+  const before = notices.length;
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    assert.equal(cmd.editorCheckCallback(false, editor, {}), true);
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    console.error = originalError;
+  }
+  assert.equal(replacements, 0);
+  assert.ok(notices.slice(before).some((msg) => msg.includes('Could not send to Inbox')));
+});
+
+test('modal inbox capture delegates to the shared inbox helper', async () => {
+  const { plugin } = makePlugin();
+  await plugin.onload();
+  let captured;
+  plugin.captureToInbox = async (text) => { captured = text; };
+  await plugin.executeCapturePayload({ destination: 'inbox', rawText: 'shared pipeline' });
+  assert.equal(captured, 'shared pipeline');
+});
