@@ -1170,7 +1170,7 @@ var QuickCapturePlugin = class extends import_obsidian.Plugin {
     });
     this.addCommand({
       id: "quick-capture-edit-task",
-      name: "Quick Capture: Edit Task at Cursor",
+      name: "Edit Task at Cursor",
       editorCheckCallback: (checking, editor, ctx) => {
         var _a;
         if (checking) {
@@ -1196,7 +1196,7 @@ var QuickCapturePlugin = class extends import_obsidian.Plugin {
     Object.keys(DESTINATION_META).forEach((dest) => {
       this.addCommand({
         id: `open-quick-capture-${dest}`,
-        name: `Quick Capture: ${DESTINATION_META[dest].label}`,
+        name: DESTINATION_META[dest].label,
         callback: () => {
           this.triggerGlobalQuickCapture(dest);
         }

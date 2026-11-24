@@ -895,7 +895,7 @@ export default class QuickCapturePlugin extends Plugin {
 
         this.addCommand({
             id: 'quick-capture-edit-task',
-            name: 'Quick Capture: Edit Task at Cursor',
+            name: 'Edit Task at Cursor',
             editorCheckCallback: (checking, editor, ctx) => {
                 if (checking) {
                     return ctx instanceof MarkdownView && !!ctx.file &&
@@ -921,7 +921,7 @@ export default class QuickCapturePlugin extends Plugin {
         (Object.keys(DESTINATION_META) as CaptureDestination[]).forEach((dest) => {
             this.addCommand({
                 id: `open-quick-capture-${dest}`,
-                name: `Quick Capture: ${DESTINATION_META[dest].label}`,
+                name: DESTINATION_META[dest].label,
                 callback: () => {
                     this.triggerGlobalQuickCapture(dest);
                 }

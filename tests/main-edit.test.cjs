@@ -221,6 +221,19 @@ test('send-to-inbox command is gated on a non-empty selection', async () => {
   assert.equal(cmd.editorCheckCallback(true, { getSelection: () => 'hello' }), true);
 });
 
+test('command names never duplicate the Quick Capture prefix', async () => {
+  const { plugin } = makePlugin();
+  await plugin.onload();
+  const names = commands.map((c) => c.name);
+  assert.ok(names.length > 0, 'commands registered');
+  assert.ok(
+    !names.some((name) => name.startsWith('Quick Capture:')),
+    `source names must not contain the plugin prefix: ${names.join(', ')}`
+  );
+  assert.equal(commands.find((c) => c.id === 'quick-capture-edit-task').name, 'Edit Task at Cursor');
+  assert.equal(commands.find((c) => c.id === 'open-quick-capture-inbox').name, 'Inbox');
+});
+
 test('send-to-inbox captures first, then clears the selection', async () => {
   const { plugin } = makePlugin();
   await plugin.onload();
