@@ -1,6 +1,6 @@
 {
   "name": "obsidian-quick-capture",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "A standalone Quick Capture window with a global shortcut",
   "main": "main.js",
   "scripts": {

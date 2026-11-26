@@ -70,7 +70,7 @@ function purgeCompletedTasksContent(
     return { content: lines.join(lineEnding), removed };
 }
 
-// Embedded CSS so the Standalone OS BrowserWindow has 100% of the Spotlight/Things styling immediately
+// Embedded CSS so the standalone OS BrowserWindow has all Quick Capture styling immediately
 export const EMBEDDED_STANDALONE_CSS = `/* =========================================================
    Quick Capture v1.4 (Standalone Electron BrowserWindow)
    ========================================================= */
@@ -407,7 +407,7 @@ export const EMBEDDED_STANDALONE_CSS = `/* =====================================
     opacity: 0.92;
 }
 
-/* Things-Style Floating Date Picker Popover */
+/* Floating Date Picker Popover */
 .qc-calendar-popover {
     position: absolute;
     bottom: 44px;
@@ -2298,7 +2298,7 @@ export default class QuickCapturePlugin extends Plugin {
      * Generates the self-contained HTML + JS document served to the standalone Electron BrowserWindow.
      * Includes full support for:
      * - All 6 Destinations (Daily, Journal, Gratitude, Win, Inbox, Task)
-     * - Interactive Things 3 Calendar Date Picker (Due Date, Start Date, Priority, Target Daily Note Day)
+     * - Interactive calendar date picker (Due Date, Start Date, Priority, Target Daily Note Day)
      * - Clipboard Paste & Drag-and-Drop Attachments
      * - Keyboard shortcuts (Tab, Ctrl+0/J/G/W/I/T, Ctrl+D, Enter to Save, Esc to Close)
      */
@@ -2367,6 +2367,7 @@ html, body {
     const root = document.getElementById('qc-standalone-root');
     let textAreaEl, pillsRowEl, destBtnEl, destMenuEl = null, targetSubEl;
     let taskCalBtnEl, dailyCalBtnEl, fileInputEl, calPopoverEl = null;
+    let bottomLeftEl, shortcutStripEl;
 
     function el(parent, tag, cls, text, attrs) {
         const node = document.createElement(tag);
@@ -2452,7 +2453,7 @@ html, body {
     window.__qcReset = function(newState) {
         if (newState) {
             state = newState;
-            destination = newState.destination || destination;
+            destination = newState.edit ? 'task' : (newState.destination || destination);
             settings = newState.settings || settings;
             todayStr = newState.todayStr || todayStr;
         }
@@ -2474,19 +2475,54 @@ html, body {
         if (textAreaEl && !editMode) textAreaEl.value = '';
         if (topTitle) topTitle.innerHTML = UI_ICONS.zap + '<span>' + (editMode ? 'EDIT TASK' : 'QUICK CAPTURE') + '</span>';
         if (submitBtn) submitBtn.innerHTML = '<span>' + (editMode ? 'Save' : 'Capture') + '</span>' + UI_ICONS.cornerDownLeft;
+        applyEditTaskChrome(Boolean(editMode));
         closeCalPopover();
         closeDestMenu();
         setDestination(destination, false);
         focusInput();
     };
 
+    function ensureDestButton() {
+        if (destBtnEl || !bottomLeftEl) return;
+        destBtnEl = el(bottomLeftEl, 'button', 'qc-dest-btn', undefined, { type: 'button' });
+        destBtnEl.onclick = (e) => { e.stopPropagation(); toggleDestMenu(); };
+    }
+
+    function renderShortcutStrip(isEdit) {
+        if (!shortcutStripEl) return;
+        const submitKey = settings.submitOnEnter !== false ? 'Enter' : 'Ctrl+Enter';
+        if (isEdit) {
+            shortcutStripEl.innerHTML = '<span><kbd class="qc-kbd">Ctrl+D</kbd> Date</span><span><kbd class="qc-kbd">' + submitKey + '</kbd> Save <kbd class="qc-kbd">Esc</kbd> Cancel</span>';
+        } else {
+            shortcutStripEl.innerHTML = '<span><kbd class="qc-kbd">Ctrl+0</kbd> Daily <kbd class="qc-kbd">Ctrl+J</kbd> Journal <kbd class="qc-kbd">Ctrl+G</kbd> Gratitude <kbd class="qc-kbd">Ctrl+W</kbd> Win <kbd class="qc-kbd">Ctrl+I</kbd> Inbox <kbd class="qc-kbd">Ctrl+T</kbd> Task</span><span><kbd class="qc-kbd">Ctrl+D</kbd> Date <kbd class="qc-kbd">' + submitKey + '</kbd> Save <kbd class="qc-kbd">Esc</kbd> Close</span>';
+        }
+    }
+
+    function applyEditTaskChrome(isEdit) {
+        if (isEdit) {
+            closeDestMenu();
+            if (destBtnEl) {
+                destBtnEl.remove();
+                destBtnEl = null;
+            }
+        } else {
+            ensureDestButton();
+        }
+        renderShortcutStrip(isEdit);
+    }
+
     function setDestination(dest, notifyServer = true) {
+        // Edit Task is a strictly locked Task-only dialog. Never let a mode
+        // switch (chip, shortcut, stale state, or API call) escape it.
+        if (editMode && dest !== 'task') return;
+        if (editMode) notifyServer = false;
+
         destination = dest;
         if (notifyServer) {
             postApi('/api/set-dest', { destination: dest });
         }
         const meta = DEST_META[dest] || DEST_META.inbox;
-        destBtnEl.innerHTML = (SVGS[meta.icon] || '') + '<span>' + meta.label + '</span>' + SVGS['chevron-down'];
+        if (destBtnEl) destBtnEl.innerHTML = (SVGS[meta.icon] || '') + '<span>' + meta.label + '</span>' + SVGS['chevron-down'];
         textAreaEl.placeholder = meta.placeholder;
 
         if (dest === 'task') {
@@ -2506,6 +2542,9 @@ html, body {
     }
 
     function updateTargetSubtitle() {
+        if (editMode) {
+            targetSubEl.textContent = 'Editing task in ' + (settings.tasksFilePath || 'Master Task List.md');
+        } else {
         const dailyFile = (targetDailyDate || todayStr) + '.md';
         if (destination === 'daily') {
             const h = (settings.dailyCaptureHeading || '').trim();
@@ -2524,6 +2563,7 @@ html, body {
             }
         } else if (destination === 'task') {
             targetSubEl.textContent = '→ ' + (settings.tasksFilePath || 'Master Task List.md');
+        }
         }
 
         const hasTaskMeta = Boolean(taskDueDate || taskStartDate || taskPriority !== 'none');
@@ -2570,6 +2610,7 @@ html, body {
     }
 
     function toggleDestMenu() {
+        if (editMode || !destBtnEl) return;
         if (destMenuEl) { closeDestMenu(); return; }
         closeCalPopover();
         const menu = el(destBtnEl.parentElement, 'div', 'qc-dest-menu');
@@ -2773,7 +2814,7 @@ html, body {
         }
         isSubmitting = true;
         await postApi('/api/capture', {
-            destination,
+            destination: editMode ? 'task' : destination,
             rawText,
             taskDueDate,
             taskStartDate,
@@ -2807,12 +2848,14 @@ html, body {
     pillsRowEl = el(root, 'div', 'qc-pills-row');
 
     const bottomBar = el(root, 'div', 'qc-bottom-bar');
-    const bottomLeft = el(bottomBar, 'div', 'qc-bottom-left');
+    bottomLeftEl = el(bottomBar, 'div', 'qc-bottom-left');
 
-    destBtnEl = el(bottomLeft, 'button', 'qc-dest-btn', undefined, { type: 'button' });
-    destBtnEl.onclick = (e) => { e.stopPropagation(); toggleDestMenu(); };
+    if (!(state && state.edit)) {
+        destBtnEl = el(bottomLeftEl, 'button', 'qc-dest-btn', undefined, { type: 'button' });
+        destBtnEl.onclick = (e) => { e.stopPropagation(); toggleDestMenu(); };
+    }
 
-    targetSubEl = el(bottomLeft, 'div', 'qc-target-sub');
+    targetSubEl = el(bottomLeftEl, 'div', 'qc-target-sub');
 
     const bottomRight = el(bottomBar, 'div', 'qc-bottom-right');
 
@@ -2824,7 +2867,7 @@ html, body {
     dailyCalBtnEl.innerHTML = SVGS['calendar-clock'];
     dailyCalBtnEl.onclick = (e) => { e.stopPropagation(); closeDestMenu(); toggleCalPopover('dailyTarget'); };
 
-    const attachBtn = el(bottomRight, 'button', 'qc-icon-btn', undefined, { type: 'button', title: 'Attach File / Screenshot' });
+    const attachBtn = el(bottomRight, 'button', 'qc-icon-btn', undefined, { type: 'button', title: 'Attach File' });
     attachBtn.innerHTML = UI_ICONS.paperclip;
     fileInputEl = el(bottomRight, 'input', undefined, undefined, { type: 'file', multiple: 'true', style: 'display:none;' });
     attachBtn.onclick = () => fileInputEl.click();
@@ -2840,9 +2883,8 @@ html, body {
     submitBtn.innerHTML = '<span>Capture</span>' + UI_ICONS.cornerDownLeft;
     submitBtn.onclick = () => submitCapture();
 
-    const strip = el(root, 'div', 'qc-shortcut-strip');
-    const submitKey = settings.submitOnEnter !== false ? 'Enter' : 'Ctrl+Enter';
-    strip.innerHTML = '<span><kbd class="qc-kbd">Ctrl+0</kbd> Daily <kbd class="qc-kbd">Ctrl+J</kbd> Journal <kbd class="qc-kbd">Ctrl+G</kbd> Gratitude <kbd class="qc-kbd">Ctrl+W</kbd> Win <kbd class="qc-kbd">Ctrl+I</kbd> Inbox <kbd class="qc-kbd">Ctrl+T</kbd> Task</span><span><kbd class="qc-kbd">Ctrl+D</kbd> Date <kbd class="qc-kbd">' + submitKey + '</kbd> Save <kbd class="qc-kbd">Esc</kbd> Close</span>';
+    shortcutStripEl = el(root, 'div', 'qc-shortcut-strip');
+    applyEditTaskChrome(Boolean(state && state.edit));
 
     root.onclick = () => { closeCalPopover(); closeDestMenu(); };
 
@@ -2860,6 +2902,7 @@ html, body {
             return;
         }
         if (e.key === 'Tab') {
+            if (editMode) return;
             e.preventDefault();
             const order = ['daily','journal','gratitude','win','inbox','task'];
             const next = (order.indexOf(destination) + (e.shiftKey ? order.length - 1 : 1)) % order.length;
@@ -2871,6 +2914,7 @@ html, body {
             const map = { '0': 'daily', 'j': 'journal', 'g': 'gratitude', 'w': 'win', 'i': 'inbox', 't': 'task' };
             if (map[k]) {
                 e.preventDefault();
+                if (editMode) return;
                 setDestination(map[k], true);
                 return;
             }
